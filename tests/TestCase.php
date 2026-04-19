@@ -20,18 +20,18 @@ abstract class TestCase extends Orchestra
 
     protected function defineEnvironment($app): void
     {
-        $driver = env('TEST_DB_CONNECTION', 'sqlite');
+        $driver = $this->testEnvironmentValue('TEST_DB_CONNECTION', 'sqlite');
 
         $app['config']->set('database.default', 'testing');
 
         if ($driver === 'pgsql') {
             $app['config']->set('database.connections.testing', [
                 'driver' => 'pgsql',
-                'host' => env('TEST_DB_HOST', '127.0.0.1'),
-                'port' => env('TEST_DB_PORT', '5432'),
-                'database' => env('TEST_DB_DATABASE', 'laravel_querybuilder_test'),
-                'username' => env('TEST_DB_USERNAME', 'postgres'),
-                'password' => env('TEST_DB_PASSWORD', ''),
+                'host' => $this->testEnvironmentValue('TEST_DB_HOST', '127.0.0.1'),
+                'port' => $this->testEnvironmentValue('TEST_DB_PORT', '5432'),
+                'database' => $this->testEnvironmentValue('TEST_DB_DATABASE', 'laravel_querybuilder_test'),
+                'username' => $this->testEnvironmentValue('TEST_DB_USERNAME', 'postgres'),
+                'password' => $this->testEnvironmentValue('TEST_DB_PASSWORD', ''),
                 'charset' => 'utf8',
                 'prefix' => '',
                 'prefix_indexes' => true,
@@ -175,5 +175,16 @@ abstract class TestCase extends Orchestra
         ]);
 
         $charlie->delete();
+    }
+
+    protected function testEnvironmentValue(string $key, string $default): string
+    {
+        $value = $_SERVER[$key] ?? $_ENV[$key] ?? getenv($key);
+
+        if ($value === false || $value === '') {
+            return $default;
+        }
+
+        return (string) $value;
     }
 }

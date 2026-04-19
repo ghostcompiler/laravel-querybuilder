@@ -690,7 +690,7 @@ class QueryBuilderEngine
     {
         $wrappedColumn = $query->getQuery()->getGrammar()->wrap($column);
 
-        if ($query->getConnection()->getDriverName() === 'pgsql') {
+        if ($query->getModel()->getConnection()->getDriverName() === 'pgsql') {
             $query->orderByRaw("{$wrappedColumn} {$direction} NULLS LAST");
 
             return;

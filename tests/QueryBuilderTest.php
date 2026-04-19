@@ -7,6 +7,7 @@ use GhostCompiler\LaravelQueryBuilder\Support\QueryBuilderEngine;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\OpenUser;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\RiskyUser;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\User;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 
 class QueryBuilderTest extends TestCase
 {
@@ -177,9 +178,13 @@ class QueryBuilderTest extends TestCase
             'with' => ['comments'],
         ])->where('name', 'Alice Doe')->first();
 
-        $this->assertNotNull($user);
+        $this->assertInstanceOf(User::class, $user);
         $this->assertTrue($user->relationLoaded('comments'));
-        $this->assertCount(1, $user->comments);
+
+        $comments = $user->getRelation('comments');
+
+        $this->assertInstanceOf(EloquentCollection::class, $comments);
+        $this->assertCount(1, $comments);
     }
 
     public function test_it_can_resolve_the_current_request_automatically(): void
