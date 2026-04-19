@@ -160,15 +160,34 @@ Current fixture coverage includes:
 
 - model search
 - nested relation search
+- morph relation search
 - scalar filters
 - relation filters
+- morph relation filters
 - relation sorting
+- morph relation eager loading
 - selective columns
 - soft deletes
 - date ranges
 - API-style pagination payloads
 - custom filter callbacks
 - strict mode validation
+
+### Optional PostgreSQL Runs
+
+The local test harness can also use PostgreSQL when these environment variables are provided:
+
+```bash
+TEST_DB_CONNECTION=pgsql
+TEST_DB_HOST=127.0.0.1
+TEST_DB_PORT=5432
+TEST_DB_DATABASE=laravel_querybuilder_test
+TEST_DB_USERNAME=postgres
+TEST_DB_PASSWORD=secret
+composer test
+```
+
+This is useful for verifying PostgreSQL-specific behavior such as boolean casting, alias-heavy queries, and subquery sorting. The database itself must already exist and be reachable from your machine.
 
 ## Adding New Features
 

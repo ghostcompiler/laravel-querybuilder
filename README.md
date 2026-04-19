@@ -217,6 +217,11 @@ class User extends Model
         'created_at',
         'roles.name',
         'profile.country',
+        'profile.is_public',
+    ];
+
+    protected array $dateFilterable = [
+        'created_at',
     ];
 
     protected array $allowedRelations = [
@@ -231,6 +236,7 @@ class User extends Model
         'score' => ['=', '>=', 'between'],
         'roles.name' => ['='],
         'profile.country' => ['='],
+        'profile.is_public' => ['=', '!=', 'in', 'not_in'],
         'is_high_score' => ['='],
     ];
 
@@ -309,6 +315,7 @@ Security note:
 
 - `search` only works for fields in `$searchable`
 - `filters` only work for fields in `$filterable` or `$customFilters`
+- `date_column` only works for fields in `$dateFilterable` when that allow-list is defined, otherwise it falls back to `$filterable`
 - `sort_by` only works for fields in `$sortable`
 - `columns` only works for fields in `$selectable`
 - `with` only works for relations in `$allowedRelations`
@@ -409,6 +416,8 @@ If strict mode is disabled, invalid values are sanitized or ignored and the quer
 ?per_page=25
 ```
 
+`per_page` is always clamped to the configured `max_per_page` or the model's `$maxPerPage` value, so oversized requests cannot force unbounded pagination sizes.
+
 ### Global search
 
 ```text
@@ -416,6 +425,14 @@ If strict mode is disabled, invalid values are sanitized or ignored and the quer
 ```
 
 This searches across the fields listed in `$searchable`.
+
+Search conditions are wrapped in their own grouped `where (...)` clause, so when search is combined with filters the resulting logic stays scoped correctly:
+
+```text
+(filters...) AND (search-column-1 OR search-column-2 OR relation-search...)
+```
+
+For large production datasets, especially on related tables, prefer indexed and selective columns in `$searchable`.
 
 ### Sorting
 
@@ -443,7 +460,10 @@ Direct filtering on `deleted_at` is intentionally blocked; use `trashed=with` or
 ```text
 ?filters[roles.name]=Admin
 ?filters[profile.country]=DE
+?filters[profile.is_public]=true
 ```
+
+Boolean relation filters are normalized automatically when the related model defines boolean casts.
 
 ### Custom filters
 
@@ -458,6 +478,8 @@ Direct filtering on `deleted_at` is intentionally blocked; use `trashed=with` or
 ?date_to=2025-12-31
 ?date_column=created_at
 ```
+
+If you define `$dateFilterable`, the `date_column` value must be in that allow-list. If you do not define `$dateFilterable`, the package falls back to the model's `$filterable` allow-list.
 
 ### Column selection
 
@@ -569,6 +591,8 @@ protected function applyHighScoreFilter($query, mixed $value, string $operator, 
 ```
 
 This lets you expose readable public API filters while keeping the SQL logic private.
+
+If a custom filter throws an exception, strict mode surfaces it as an `InvalidQueryBuilderQuery` entry using the filter key, for example `filters.is_high_score`, together with the underlying failure message.
 
 ## Per-Field Operator Rules
 
@@ -770,6 +794,8 @@ Request-driven dotted relation paths are limited by `max_relation_depth` for:
 
 This helps prevent overly deep relation chains from turning into expensive queries.
 
+Standard relation paths and `morphMany` relation paths are covered by the current test suite for search, filtering, and eager loading. Relation sorting is still intentionally focused on the standard one-level relation types supported by the package.
+
 ### Index the fields you expose
 
 If a field is used in:
@@ -796,6 +822,19 @@ If both headers and request query parameters are present, precedence is controll
 
 The package uses `WeakMap`-backed registries for remembered request and response metadata, so temporary builder state follows the lifecycle of the underlying query object instead of lingering across long-lived PHP worker processes.
 
+### Aliased base queries are supported
+
+The package supports base queries that rename the root table with `from('table as alias')`. Qualification, filtering, sorting, and soft-delete handling now follow the active base-table reference instead of assuming the raw model table name.
+
+Example:
+
+```php
+User::query()
+    ->from('users as members')
+    ->queryBuilder($request)
+    ->paginateTable();
+```
+
 ## Testing
 
 This package includes:
@@ -803,6 +842,7 @@ This package includes:
 - Orchestra Testbench
 - an in-memory SQLite test database
 - fixture models and relations
+- morph relation coverage for request-driven search, filters, and eager loading
 - CI coverage for Laravel 10 through 13
 
 The package runtime supports PHP 8.1+, while the local static-analysis quality stack is intended to run on PHP 8.2+ because current Larastan releases require that.
@@ -818,6 +858,20 @@ Run the full quality suite:
 ```bash
 composer quality
 ```
+
+Optional PostgreSQL test runs can also be configured through environment variables in local development:
+
+```bash
+TEST_DB_CONNECTION=pgsql
+TEST_DB_HOST=127.0.0.1
+TEST_DB_PORT=5432
+TEST_DB_DATABASE=laravel_querybuilder_test
+TEST_DB_USERNAME=postgres
+TEST_DB_PASSWORD=secret
+composer test
+```
+
+The package test harness supports this mode, but you need a reachable PostgreSQL server and a prepared test database on your machine.
 
 ## Quality and Security
 

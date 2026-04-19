@@ -3,6 +3,7 @@
 namespace GhostCompiler\LaravelQueryBuilder\Tests;
 
 use GhostCompiler\LaravelQueryBuilder\LaravelQueryBuilderServiceProvider;
+use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\Comment;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\Permission;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\Post;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\Profile;
@@ -19,7 +20,28 @@ abstract class TestCase extends Orchestra
 
     protected function defineEnvironment($app): void
     {
+        $driver = env('TEST_DB_CONNECTION', 'sqlite');
+
         $app['config']->set('database.default', 'testing');
+
+        if ($driver === 'pgsql') {
+            $app['config']->set('database.connections.testing', [
+                'driver' => 'pgsql',
+                'host' => env('TEST_DB_HOST', '127.0.0.1'),
+                'port' => env('TEST_DB_PORT', '5432'),
+                'database' => env('TEST_DB_DATABASE', 'laravel_querybuilder_test'),
+                'username' => env('TEST_DB_USERNAME', 'postgres'),
+                'password' => env('TEST_DB_PASSWORD', ''),
+                'charset' => 'utf8',
+                'prefix' => '',
+                'prefix_indexes' => true,
+                'schema' => 'public',
+                'sslmode' => 'prefer',
+            ]);
+
+            return;
+        }
+
         $app['config']->set('database.connections.testing', [
             'driver' => 'sqlite',
             'database' => ':memory:',
@@ -91,6 +113,7 @@ abstract class TestCase extends Orchestra
             'user_id' => $alice->id,
             'city' => 'Amsterdam',
             'country' => 'NL',
+            'is_public' => true,
             'bio' => 'Platform admin and API architect',
         ]);
 
@@ -98,6 +121,7 @@ abstract class TestCase extends Orchestra
             'user_id' => $bob->id,
             'city' => 'Berlin',
             'country' => 'DE',
+            'is_public' => false,
             'bio' => 'Content writer and editor',
         ]);
 
@@ -105,10 +129,11 @@ abstract class TestCase extends Orchestra
             'user_id' => $charlie->id,
             'city' => 'Cairo',
             'country' => 'EG',
+            'is_public' => false,
             'bio' => 'Support specialist',
         ]);
 
-        Post::create([
+        $alicePost = Post::create([
             'user_id' => $alice->id,
             'title' => 'Scaling admin workflows',
             'created_at' => '2025-01-11 08:00:00',
@@ -120,6 +145,33 @@ abstract class TestCase extends Orchestra
             'title' => 'Editorial planning guide',
             'created_at' => '2025-03-13 08:00:00',
             'updated_at' => '2025-03-13 08:00:00',
+        ]);
+
+        Comment::create([
+            'commentable_type' => User::class,
+            'commentable_id' => $alice->id,
+            'body' => 'Moderation notes for the admin account',
+            'is_visible' => true,
+            'created_at' => '2025-01-12 08:00:00',
+            'updated_at' => '2025-01-12 08:00:00',
+        ]);
+
+        Comment::create([
+            'commentable_type' => User::class,
+            'commentable_id' => $bob->id,
+            'body' => 'Internal review draft',
+            'is_visible' => false,
+            'created_at' => '2025-03-14 08:00:00',
+            'updated_at' => '2025-03-14 08:00:00',
+        ]);
+
+        Comment::create([
+            'commentable_type' => Post::class,
+            'commentable_id' => $alicePost->id,
+            'body' => 'Post-level comment for morph coverage',
+            'is_visible' => true,
+            'created_at' => '2025-01-15 08:00:00',
+            'updated_at' => '2025-01-15 08:00:00',
         ]);
 
         $charlie->delete();

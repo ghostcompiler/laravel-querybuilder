@@ -26,6 +26,10 @@ class OpenUser extends Model
 
     protected string $defaultSortDir = 'asc';
 
+    protected array $dateFilterable = [
+        'created_at',
+    ];
+
     public function profile(): HasOne
     {
         return $this->hasOne(Profile::class, 'user_id');

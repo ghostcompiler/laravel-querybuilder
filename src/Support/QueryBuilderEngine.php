@@ -63,6 +63,16 @@ class QueryBuilderEngine
      */
     protected static array $columnCache = [];
 
+    /**
+     * @var array<string, ReflectionProperty|false>
+     */
+    protected static array $reflectionPropertyCache = [];
+
+    /**
+     * @var array<string, ReflectionMethod|false>
+     */
+    protected static array $reflectionMethodCache = [];
+
     public function apply(Builder $query, Request|array $request, array $response = []): Builder
     {
         $errors = [];
@@ -180,7 +190,7 @@ class QueryBuilderEngine
         }
 
         $query->select(array_map(
-            fn (string $column) => $this->qualify($model, $column),
+            fn (string $column) => $this->qualify($query, $column),
             $safeColumns
         ));
 
@@ -199,27 +209,28 @@ class QueryBuilderEngine
             return $query;
         }
 
+        $deletedAtColumn = method_exists($model, 'getDeletedAtColumn')
+            ? $model->getDeletedAtColumn()
+            : 'deleted_at';
+        $qualifiedDeletedAtColumn = $this->qualify($query, $deletedAtColumn);
         $trashed = $params['trashed'] ?? null;
 
         if ($trashed !== null && ! in_array($trashed, ['with', 'only'], true)) {
             $this->recordError($errors, 'trashed', 'The trashed parameter must be either [with] or [only].');
         }
 
+        $query = $query->withoutGlobalScope(SoftDeletingScope::class);
+
         if ($trashed === 'with') {
-            return $query->withoutGlobalScope(SoftDeletingScope::class);
+            return $query;
         }
 
         if ($trashed === 'only') {
-            $deletedAtColumn = method_exists($model, 'getDeletedAtColumn')
-                ? $model->getDeletedAtColumn()
-                : 'deleted_at';
-
             return $query
-                ->withoutGlobalScope(SoftDeletingScope::class)
-                ->whereNotNull($model->qualifyColumn($deletedAtColumn));
+                ->whereNotNull($qualifiedDeletedAtColumn);
         }
 
-        return $query;
+        return $query->whereNull($qualifiedDeletedAtColumn);
     }
 
     protected function applySearch(Builder $query, array $params, array &$errors): Builder
@@ -240,7 +251,7 @@ class QueryBuilderEngine
         $model = $query->getModel();
         $tableColumns = $this->tableColumns($model);
 
-        $query->where(function (Builder $nested) use ($searchable, $term, $model, $tableColumns, &$errors): void {
+        $query->where(function (Builder $nested) use ($searchable, $term, $tableColumns, &$errors): void {
             foreach ($searchable as $field) {
                 if (! is_string($field) || $field === '') {
                     continue;
@@ -276,7 +287,7 @@ class QueryBuilderEngine
                 }
 
                 $nested->orWhere(
-                    $this->qualify($model, $field),
+                    $this->qualify($nested, $field),
                     'LIKE',
                     $this->likePattern($term, $this->searchLikeMode())
                 );
@@ -402,7 +413,7 @@ class QueryBuilderEngine
                 continue;
             }
 
-            $this->applyOperator($query, $this->qualify($model, $field), $operator, $value);
+            $this->applyOperator($query, $this->qualify($query, $field), $operator, $value);
         }
 
         return $query;
@@ -420,6 +431,7 @@ class QueryBuilderEngine
         $model = $query->getModel();
         $column = (string) ($params['date_column'] ?? 'created_at');
         $tableColumns = $this->tableColumns($model);
+        $dateFilterable = $this->dateFilterableColumns($model);
 
         if ($tableColumns !== [] && ! in_array($column, $tableColumns, true)) {
             $this->recordError($errors, 'date_column', "Date column [{$column}] does not exist.");
@@ -427,7 +439,13 @@ class QueryBuilderEngine
             return $query;
         }
 
-        $qualifiedColumn = $this->qualify($model, $column);
+        if ($dateFilterable !== [] && ! in_array($column, $dateFilterable, true)) {
+            $this->recordError($errors, 'date_column', "Date column [{$column}] is not allowed for date filtering.");
+
+            return $query;
+        }
+
+        $qualifiedColumn = $this->qualify($query, $column);
 
         if ($from !== null) {
             $fromDate = $this->parseDateBoundary((string) $from, true);
@@ -549,7 +567,7 @@ class QueryBuilderEngine
                 continue;
             }
 
-            $query->orderBy($this->qualify($model, $field), $direction);
+            $query->orderBy($this->qualify($query, $field), $direction);
             $appliedSorts[] = "{$field}:{$direction}";
         }
 
@@ -562,7 +580,7 @@ class QueryBuilderEngine
                 && ($tableColumns === [] || in_array($fallbackField, $tableColumns, true))
                 && ($sortable === [] || in_array($fallbackField, $sortable, true))
             ) {
-                $query->orderBy($this->qualify($model, $fallbackField), $fallbackDirection);
+                $query->orderBy($this->qualify($query, $fallbackField), $fallbackDirection);
                 $appliedSorts[] = "{$fallbackField}:{$fallbackDirection}";
             }
         }
@@ -595,8 +613,10 @@ class QueryBuilderEngine
                 return false;
             }
 
+            $baseTable = $this->baseTableReference($query);
+
             if ($query->getQuery()->columns === null) {
-                $query->select($model->getTable().'.*');
+                $query->select($baseTable.'.*');
             }
 
             if ($relation instanceof BelongsTo) {
@@ -606,12 +626,12 @@ class QueryBuilderEngine
                 $query
                     ->leftJoin(
                         $relatedModel->getTable().' as '.$alias,
-                        $model->getTable().'.'.$relation->getForeignKeyName(),
+                        $baseTable.'.'.$relation->getForeignKeyName(),
                         '=',
                         $alias.'.'.$relation->getOwnerKeyName()
-                    )
-                    ->orderByRaw("{$alias}.{$leafColumn} IS NULL")
-                    ->orderBy("{$alias}.{$leafColumn}", $direction);
+                    );
+
+                $this->applyNullsLastOrder($query, "{$alias}.{$leafColumn}", $direction);
 
                 return true;
             }
@@ -622,14 +642,14 @@ class QueryBuilderEngine
             if ($relation instanceof HasOne) {
                 $subquery = DB::table($relatedModel->getTable())
                     ->select($leafColumn)
-                    ->whereColumn($relation->getForeignKeyName(), $model->getTable().'.'.$model->getKeyName())
+                    ->whereColumn($relation->getForeignKeyName(), $baseTable.'.'.$model->getKeyName())
                     ->limit(1);
             }
 
             if ($relation instanceof HasMany) {
                 $subquery = DB::table($relatedModel->getTable())
                     ->select($leafColumn)
-                    ->whereColumn($relation->getForeignKeyName(), $model->getTable().'.'.$model->getKeyName())
+                    ->whereColumn($relation->getForeignKeyName(), $baseTable.'.'.$model->getKeyName())
                     ->orderBy($leafColumn, $direction)
                     ->limit(1);
             }
@@ -645,7 +665,7 @@ class QueryBuilderEngine
                     )
                     ->whereColumn(
                         $relation->getTable().'.'.$relation->getForeignPivotKeyName(),
-                        $model->getTable().'.'.$model->getKeyName()
+                        $baseTable.'.'.$model->getKeyName()
                     )
                     ->orderBy($relatedModel->getTable().'.'.$leafColumn, $direction)
                     ->limit(1);
@@ -657,15 +677,28 @@ class QueryBuilderEngine
 
             $joinRegistry[$relationName] = true;
 
-            $query
-                ->selectSub($subquery, $sortAlias)
-                ->orderByRaw("{$sortAlias} IS NULL")
-                ->orderBy($sortAlias, $direction);
+            $query->selectSub($subquery, $sortAlias);
+            $this->applyNullsLastOrder($query, $sortAlias, $direction);
 
             return true;
         } catch (Throwable) {
             return false;
         }
+    }
+
+    protected function applyNullsLastOrder(Builder $query, string $column, string $direction): void
+    {
+        $wrappedColumn = $query->getQuery()->getGrammar()->wrap($column);
+
+        if ($query->getConnection()->getDriverName() === 'pgsql') {
+            $query->orderByRaw("{$wrappedColumn} {$direction} NULLS LAST");
+
+            return;
+        }
+
+        $query
+            ->orderByRaw("{$wrappedColumn} IS NULL")
+            ->orderBy($column, $direction);
     }
 
     protected function applyOperator(Builder $query, string $column, string $operator, mixed $value): void
@@ -1335,6 +1368,23 @@ class QueryBuilderEngine
         return max((int) config('query-builder.max_filter_value_count', 100), 1);
     }
 
+    /**
+     * @return list<string>
+     */
+    protected function dateFilterableColumns(Model $model): array
+    {
+        $configured = $this->readModelProperty($model, 'dateFilterable');
+
+        if (is_array($configured) && $configured !== []) {
+            return array_values(array_filter(array_map(
+                static fn (mixed $value): string => trim((string) $value),
+                $configured
+            ), static fn (string $value): bool => $value !== ''));
+        }
+
+        return $this->modelArrayOption($model, 'filterable');
+    }
+
     protected function searchLikeMode(): string
     {
         return $this->validatedLikeMode((string) config('query-builder.search_like_mode', 'contains'));
@@ -1416,7 +1466,17 @@ class QueryBuilderEngine
         }
 
         if (str_contains($field, '.')) {
-            return false;
+            $fieldModel = $this->fieldModel($model, $field);
+
+            if ($fieldModel === null) {
+                return false;
+            }
+
+            $castField = $this->leafColumn($field);
+            $casts = $fieldModel->getCasts();
+            $cast = strtolower((string) ($casts[$castField] ?? ''));
+
+            return in_array($cast, ['bool', 'boolean'], true);
         }
 
         $casts = $model->getCasts();
@@ -1471,9 +1531,30 @@ class QueryBuilderEngine
         return (string) end($parts);
     }
 
-    protected function qualify(Model $model, string $column): string
+    protected function qualify(Builder $query, string $column): string
     {
-        return $model->getTable().'.'.$column;
+        return $this->baseTableReference($query).'.'.$column;
+    }
+
+    protected function baseTableReference(Builder $query): string
+    {
+        $from = $query->getQuery()->from;
+
+        if (! is_string($from) || trim($from) === '') {
+            return $query->getModel()->getTable();
+        }
+
+        $normalized = preg_replace('/\s+/', ' ', trim($from)) ?? trim($from);
+
+        if (preg_match('/\s+as\s+([^\s]+)$/i', $normalized, $matches) === 1) {
+            return trim($matches[1], "`\"'");
+        }
+
+        if (preg_match('/^\S+\s+([^\s]+)$/', $normalized, $matches) === 1 && ! str_starts_with($normalized, '(')) {
+            return trim($matches[1], "`\"'");
+        }
+
+        return trim($normalized, "`\"'");
     }
 
     protected function strictMode(Model $model): bool
@@ -1544,7 +1625,7 @@ class QueryBuilderEngine
             'message' => null,
         ];
 
-        $remembered = $this->responseRegistry()[$this->queryObject($query)] ?? [];
+        $remembered = $this->responseRegistry()[$this->registryKey($query)] ?? [];
 
         return array_replace($defaults, $remembered, $response);
     }
@@ -1625,7 +1706,12 @@ class QueryBuilderEngine
     protected function invokeModelMethod(Model $model, string $method, array $arguments = []): mixed
     {
         try {
-            $reflection = new ReflectionMethod($model, $method);
+            $reflection = $this->reflectionMethod($model, $method);
+
+            if (! $reflection instanceof ReflectionMethod) {
+                return null;
+            }
+
             $reflection->setAccessible(true);
 
             return $reflection->invokeArgs($model, $arguments);
@@ -1662,12 +1748,12 @@ class QueryBuilderEngine
      */
     protected function rememberRequestParams(Builder $query, array $params): void
     {
-        $this->requestRegistry()[$this->queryObject($query)] = $params;
+        $this->requestRegistry()[$this->registryKey($query)] = $params;
     }
 
     protected function rememberedRequestParams(Builder $query): array
     {
-        return $this->requestRegistry()[$this->queryObject($query)] ?? [];
+        return $this->requestRegistry()[$this->registryKey($query)] ?? [];
     }
 
     /**
@@ -1679,7 +1765,7 @@ class QueryBuilderEngine
             return;
         }
 
-        $this->responseRegistry()[$this->queryObject($query)] = $response;
+        $this->responseRegistry()[$this->registryKey($query)] = $response;
     }
 
     /**
@@ -1687,7 +1773,7 @@ class QueryBuilderEngine
      */
     protected function rememberAppliedSorts(Builder $query, array $appliedSorts): void
     {
-        $this->appliedSortRegistry()[$this->queryObject($query)] = $appliedSorts;
+        $this->appliedSortRegistry()[$this->registryKey($query)] = $appliedSorts;
     }
 
     /**
@@ -1695,12 +1781,12 @@ class QueryBuilderEngine
      */
     protected function appliedSortsFor(Builder $query): ?array
     {
-        return $this->appliedSortRegistry()[$this->queryObject($query)] ?? null;
+        return $this->appliedSortRegistry()[$this->registryKey($query)] ?? null;
     }
 
-    protected function queryObject(Builder $query): object
+    protected function registryKey(Builder $query): object
     {
-        return $query->getQuery();
+        return $query;
     }
 
     /**
@@ -1729,18 +1815,61 @@ class QueryBuilderEngine
 
     protected function readModelProperty(Model $model, string $property, mixed $default = null): mixed
     {
-        if (! property_exists($model, $property)) {
+        $reflection = $this->reflectionProperty($model, $property);
+
+        if (! $reflection instanceof ReflectionProperty) {
             return $default;
         }
 
         try {
-            $reflection = new ReflectionProperty($model, $property);
-
             return $reflection->isInitialized($model)
                 ? $reflection->getValue($model)
                 : $default;
         } catch (ReflectionException) {
             return $default;
+        }
+    }
+
+    protected function fieldModel(Model $model, string $field): ?Model
+    {
+        if (! str_contains($field, '.')) {
+            return $model;
+        }
+
+        $relations = explode('.', $field);
+        array_pop($relations);
+        $relation = $this->resolveRelation($model, $relations);
+
+        return $relation?->getRelated();
+    }
+
+    protected function reflectionProperty(Model $model, string $property): ReflectionProperty|false
+    {
+        $cacheKey = get_class($model).'::'.$property;
+
+        if (array_key_exists($cacheKey, static::$reflectionPropertyCache)) {
+            return static::$reflectionPropertyCache[$cacheKey];
+        }
+
+        try {
+            return static::$reflectionPropertyCache[$cacheKey] = new ReflectionProperty($model, $property);
+        } catch (ReflectionException) {
+            return static::$reflectionPropertyCache[$cacheKey] = false;
+        }
+    }
+
+    protected function reflectionMethod(Model $model, string $method): ReflectionMethod|false
+    {
+        $cacheKey = get_class($model).'::'.$method;
+
+        if (array_key_exists($cacheKey, static::$reflectionMethodCache)) {
+            return static::$reflectionMethodCache[$cacheKey];
+        }
+
+        try {
+            return static::$reflectionMethodCache[$cacheKey] = new ReflectionMethod($model, $method);
+        } catch (ReflectionException) {
+            return static::$reflectionMethodCache[$cacheKey] = false;
         }
     }
 }

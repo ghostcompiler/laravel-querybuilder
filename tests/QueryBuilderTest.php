@@ -19,6 +19,15 @@ class QueryBuilderTest extends TestCase
         $this->assertSame(['Bob Smith'], $results);
     }
 
+    public function test_it_searches_across_morph_many_relation_columns(): void
+    {
+        $results = User::QueryBuild(['search' => 'Moderation'])
+            ->pluck('name')
+            ->all();
+
+        $this->assertSame(['Alice Doe'], $results);
+    }
+
     public function test_it_filters_by_scalar_and_relation_fields(): void
     {
         $results = User::QueryBuild([
@@ -28,6 +37,17 @@ class QueryBuilderTest extends TestCase
                     'operator' => '=',
                     'value' => 'Admin',
                 ],
+            ],
+        ])->pluck('name')->all();
+
+        $this->assertSame(['Alice Doe'], $results);
+    }
+
+    public function test_it_filters_by_morph_many_relation_fields(): void
+    {
+        $results = User::QueryBuild([
+            'filters' => [
+                'comments.is_visible' => 'true',
             ],
         ])->pluck('name')->all();
 
@@ -44,6 +64,17 @@ class QueryBuilderTest extends TestCase
         ])->pluck('name')->all();
 
         $this->assertSame(['Charlie Ray'], $results);
+    }
+
+    public function test_it_normalizes_boolean_string_filters_on_related_models(): void
+    {
+        $results = User::QueryBuild([
+            'filters' => [
+                'profile.is_public' => 'true',
+            ],
+        ])->pluck('name')->all();
+
+        $this->assertSame(['Alice Doe'], $results);
     }
 
     public function test_it_sorts_by_related_fields(): void
@@ -79,6 +110,40 @@ class QueryBuilderTest extends TestCase
         $this->assertSame(['Charlie Ray'], $deletedUsers);
     }
 
+    public function test_it_respects_date_column_allow_lists(): void
+    {
+        config()->set('query-builder.strict_mode', true);
+
+        try {
+            User::QueryBuild([
+                'date_from' => '2025-01-01',
+                'date_column' => 'email',
+            ])->get();
+
+            $this->fail('Expected strict mode to block non-allow-listed date columns.');
+        } catch (InvalidQueryBuilderQuery $exception) {
+            $this->assertSame('date_column', $exception->errors()[0]['parameter']);
+            $this->assertStringContainsString('not allowed', $exception->errors()[0]['reason']);
+        }
+    }
+
+    public function test_it_supports_base_query_aliases_for_filters_and_sorting(): void
+    {
+        $results = User::query()
+            ->from('users as members')
+            ->queryBuilder([
+                'filters' => [
+                    'status' => 'active',
+                ],
+                'sort_by' => 'id',
+                'sort_dir' => 'asc',
+            ])
+            ->pluck('members.name')
+            ->all();
+
+        $this->assertSame(['Alice Doe', 'Bob Smith'], $results);
+    }
+
     public function test_it_returns_a_structured_paginate_table_payload(): void
     {
         $query = User::QueryBuild([
@@ -104,6 +169,17 @@ class QueryBuilderTest extends TestCase
         $this->assertSame(['profile', 'roles.permissions'], $payload['meta']['applied_filters']['with']);
         $this->assertCount(1, $payload['data']);
         $this->assertArrayNotHasKey('message', $payload);
+    }
+
+    public function test_it_eager_loads_allowed_morph_many_relations(): void
+    {
+        $user = User::QueryBuild([
+            'with' => ['comments'],
+        ])->where('name', 'Alice Doe')->first();
+
+        $this->assertNotNull($user);
+        $this->assertTrue($user->relationLoaded('comments'));
+        $this->assertCount(1, $user->comments);
     }
 
     public function test_it_can_resolve_the_current_request_automatically(): void

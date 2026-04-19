@@ -13,6 +13,10 @@ class Profile extends Model
 
     public $timestamps = false;
 
+    protected $casts = [
+        'is_public' => 'boolean',
+    ];
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);

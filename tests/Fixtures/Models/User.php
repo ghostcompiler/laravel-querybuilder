@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class User extends Model
@@ -28,6 +29,7 @@ class User extends Model
         'name',
         'email',
         'profile.bio',
+        'comments.body',
         'roles.name',
         'roles.permissions.name',
     ];
@@ -50,17 +52,25 @@ class User extends Model
         'is_active',
         'score',
         'created_at',
+        'comments.is_visible',
         'roles.name',
         'profile.country',
+        'profile.is_public',
     ];
 
     protected array $allowedFilterOperators = [
         'status' => ['=', 'in'],
         'is_active' => ['=', '!=', 'in', 'not_in'],
         'score' => ['=', '>=', 'between'],
+        'comments.is_visible' => ['=', '!=', 'in', 'not_in'],
         'roles.name' => ['='],
         'profile.country' => ['='],
+        'profile.is_public' => ['=', '!=', 'in', 'not_in'],
         'is_high_score' => ['='],
+    ];
+
+    protected array $dateFilterable = [
+        'created_at',
     ];
 
     protected array $customFilters = [
@@ -69,6 +79,7 @@ class User extends Model
 
     protected array $allowedRelations = [
         'profile',
+        'comments',
         'roles',
         'roles.permissions',
         'posts',
@@ -90,6 +101,11 @@ class User extends Model
     public function posts(): HasMany
     {
         return $this->hasMany(Post::class);
+    }
+
+    public function comments(): MorphMany
+    {
+        return $this->morphMany(Comment::class, 'commentable');
     }
 
     public function roles(): BelongsToMany
