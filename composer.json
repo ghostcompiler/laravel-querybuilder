@@ -1,0 +1,70 @@
+{
+    "name": "ghostcompiler/laravel-querybuilder",
+    "description": "Reusable query builder helpers for Eloquent APIs on Laravel 10 through 13.",
+    "type": "library",
+    "license": "MIT",
+    "homepage": "https://github.com/ghostcompiler/laravel-querybuilder",
+    "keywords": [
+        "laravel",
+        "query-builder",
+        "eloquent",
+        "api",
+        "filtering"
+    ],
+    "support": {
+        "issues": "https://github.com/ghostcompiler/laravel-querybuilder/issues",
+        "source": "https://github.com/ghostcompiler/laravel-querybuilder"
+    },
+    "require": {
+        "php": "^8.1",
+        "illuminate/database": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/http": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/pagination": "^10.0 || ^11.0 || ^12.0 || ^13.0",
+        "illuminate/support": "^10.0 || ^11.0 || ^12.0 || ^13.0"
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.9",
+        "laravel/pint": "^1.18",
+        "phpstan/phpstan": "^2.1",
+        "orchestra/testbench": "^8.0 || ^9.0 || ^10.0 || ^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "GhostCompiler\\LaravelQueryBuilder\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "GhostCompiler\\LaravelQueryBuilder\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "format": "vendor/bin/pint",
+        "lint": "vendor/bin/pint --test",
+        "stan": "vendor/bin/phpstan analyse --no-progress --debug",
+        "quality": [
+            "@analyse",
+            "@lint",
+            "@stan",
+            "@test"
+        ],
+        "test": "vendor/bin/phpunit",
+        "test:coverage": "vendor/bin/phpunit --coverage-text",
+        "analyse": "composer validate --strict"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "GhostCompiler\\LaravelQueryBuilder\\LaravelQueryBuilderServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "composer/package-versions-deprecated": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
