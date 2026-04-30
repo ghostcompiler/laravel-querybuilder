@@ -533,6 +533,17 @@ class QueryBuilderTest extends TestCase
         $this->assertSame(['Alice Doe', 'Bob Smith'], $results);
     }
 
+    public function test_fluent_query_can_paginate_without_schema_or_requested_sort(): void
+    {
+        $this->authenticateTenant(1);
+
+        $payload = Query::for(User::class)->paginate();
+
+        $this->assertSame(2, $payload['meta']['total']);
+        $this->assertSame(1, $payload['meta']['current_page']);
+        $this->assertSame(['Bob Smith', 'Alice Doe'], collect($payload['data'])->pluck('name')->all());
+    }
+
     public function test_fluent_query_can_disable_tenant_isolation(): void
     {
         $this->authenticateTenant(1);

@@ -582,7 +582,11 @@ class QueryBuilderEngine
     protected function applySorting(Builder $query, array $params, array &$errors): Builder
     {
         $model = $query->getModel();
-        $fields = $this->stringOrArrayToArray($params['sort_by'] ?? $this->defaultSortBy($model));
+        $hasRequestedSort = array_key_exists('sort_by', $params)
+            && $this->stringOrArrayToArray($params['sort_by']) !== [];
+        $fields = $hasRequestedSort
+            ? $this->stringOrArrayToArray($params['sort_by'])
+            : [];
         $directions = $this->stringOrArrayToArray($params['sort_dir'] ?? $this->defaultSortDirection($model));
         $sortable = $this->modelArrayOption($model, 'sortable');
         $tableColumns = $this->tableColumns($model);
