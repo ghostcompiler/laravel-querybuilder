@@ -4,7 +4,13 @@ namespace GhostCompiler\LaravelQueryBuilder\Support;
 
 use Carbon\CarbonImmutable;
 use Closure;
+use GhostCompiler\LaravelQueryBuilder\Contracts\Filter;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\IncludeDepthExceededException;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidFilterException;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidIncludeException;
 use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidQueryBuilderQuery;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidSortException;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\UnauthorizedRelationException;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -16,10 +22,12 @@ use Illuminate\Database\Eloquent\SoftDeletingScope;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
 use ReflectionException;
 use ReflectionMethod;
 use ReflectionProperty;
+use stdClass;
 use Throwable;
 use WeakMap;
 
@@ -31,15 +39,19 @@ class QueryBuilderEngine
     protected array $allowedRequestKeys = [
         'search',
         'filters',
+        'filter',
         'sort_by',
         'sort_dir',
+        'sort',
         'page',
         'per_page',
         'date_from',
         'date_to',
         'date_column',
         'columns',
+        'fields',
         'with',
+        'include',
         'trashed',
     ];
 
@@ -73,6 +85,21 @@ class QueryBuilderEngine
      */
     protected static array $reflectionMethodCache = [];
 
+    /**
+     * @var array<string, mixed>|null
+     */
+    protected ?array $runtimeDefinition = null;
+
+    /**
+     * @var array<string, mixed>|null
+     */
+    protected static ?array $legacyConfigDefaults = null;
+
+    /**
+     * @var array<string, mixed>|null
+     */
+    protected static ?array $modernConfigDefaults = null;
+
     public function apply(Builder $query, Request|array $request, array $response = []): Builder
     {
         $errors = [];
@@ -92,6 +119,21 @@ class QueryBuilderEngine
         $this->throwIfStrict($query->getModel(), $errors);
 
         return $query;
+    }
+
+    /**
+     * @param  array<string, mixed>  $definition
+     */
+    public function applyWithDefinition(Builder $query, Request|array $request, array $definition = [], array $response = []): Builder
+    {
+        $previous = $this->runtimeDefinition;
+        $this->runtimeDefinition = $definition;
+
+        try {
+            return $this->apply($query, $request, $response);
+        } finally {
+            $this->runtimeDefinition = $previous;
+        }
     }
 
     public function paginate(Builder $query, Request|array|null $request = null): LengthAwarePaginator
@@ -149,15 +191,18 @@ class QueryBuilderEngine
 
     protected function applyColumnSelection(Builder $query, array $params, array &$errors): Builder
     {
-        $columns = $params['columns'] ?? null;
+        $model = $query->getModel();
+        $columns = $params['columns'] ?? $this->fieldsForModel($params, $model);
 
         if ($columns === null || $columns === '') {
             return $query;
         }
 
         $requested = $this->stringOrArrayToArray($columns);
-        $model = $query->getModel();
-        $selectable = $this->modelArrayOption($model, 'selectable');
+        $selectable = array_values(array_diff(
+            $this->modelArrayOption($model, 'selectable'),
+            $this->maskedColumns($model)
+        ));
         $tableColumns = $this->tableColumns($model);
 
         if ($requested === [] || $tableColumns === []) {
@@ -182,7 +227,8 @@ class QueryBuilderEngine
         $invalidColumns = array_values(array_diff($requested, $safeColumns));
 
         foreach ($invalidColumns as $invalidColumn) {
-            $this->recordError($errors, 'columns', "Column [{$invalidColumn}] is not selectable.");
+            $parameter = array_key_exists('fields', $params) ? 'fields' : 'columns';
+            $this->recordError($errors, $parameter, "Column [{$invalidColumn}] is not selectable.");
         }
 
         if (! in_array($keyName, $safeColumns, true)) {
@@ -482,7 +528,8 @@ class QueryBuilderEngine
             return $query;
         }
 
-        $allowedRelations = $this->modelArrayOption($query->getModel(), 'allowedRelations');
+        $model = $query->getModel();
+        $allowedRelations = $this->modelArrayOption($model, 'allowedRelations');
         $safeRelations = [];
 
         if ($allowedRelations === []) {
@@ -497,13 +544,27 @@ class QueryBuilderEngine
             }
 
             if (! $this->isAllowedRelationDepth($relation)) {
-                $this->recordError($errors, 'with', "Relation [{$relation}] exceeds the configured maximum depth.");
+                $this->recordError($errors, 'with', "Relation [{$relation}] exceeds the configured maximum relation depth.");
 
                 continue;
             }
 
             if (! in_array($relation, $allowedRelations, true)) {
                 $this->recordError($errors, 'with', "Relation [{$relation}] is not allowed for eager loading.");
+
+                continue;
+            }
+
+            if (! $this->relationExists($model, $relation)) {
+                $this->recordError($errors, 'with', "Relation [{$relation}] does not exist on the model.");
+
+                continue;
+            }
+
+            if (! $this->relationPolicyAllows($model, $relation)) {
+                if ($this->strictIncludes()) {
+                    $this->recordError($errors, 'with', "Relation [{$relation}] is not authorized for eager loading.");
+                }
 
                 continue;
             }
@@ -795,8 +856,17 @@ class QueryBuilderEngine
                 return null;
             }
 
-            $resolvedRelation = $current->{$relationName}();
-            $current = $resolvedRelation->getRelated();
+            try {
+                $resolvedRelation = $current->{$relationName}();
+
+                if (! is_object($resolvedRelation) || ! method_exists($resolvedRelation, 'getRelated')) {
+                    return null;
+                }
+
+                $current = $resolvedRelation->getRelated();
+            } catch (Throwable) {
+                return null;
+            }
         }
 
         return $resolvedRelation;
@@ -863,24 +933,161 @@ class QueryBuilderEngine
         return static::$columnCache[$cacheKey];
     }
 
+    protected function fieldsForModel(array $params, Model $model): array|string|null
+    {
+        $fields = $params['fields'] ?? null;
+
+        if (! is_array($fields)) {
+            return null;
+        }
+
+        $candidates = [
+            $model->getTable(),
+            class_basename($model),
+            strtolower(class_basename($model)),
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (array_key_exists($candidate, $fields)) {
+                return $fields[$candidate];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    protected function maskedColumns(Model $model): array
+    {
+        if (! (bool) $this->configValue('mask_sensitive_columns', true)) {
+            return [];
+        }
+
+        $configured = $this->configValue('masked_columns', []);
+
+        if (! is_array($configured)) {
+            return [];
+        }
+
+        $columns = $configured[$model->getTable()] ?? $configured[get_class($model)] ?? [];
+
+        return array_values(array_filter(array_map(
+            static fn (mixed $column): string => trim((string) $column),
+            is_array($columns) ? $columns : [$columns],
+        ), static fn (string $column): bool => $column !== ''));
+    }
+
+    protected function relationExists(Model $model, string $relation): bool
+    {
+        return $this->resolveRelation($model, explode('.', $relation)) !== null;
+    }
+
+    protected function relationPolicyAllows(Model $model, string $relation): bool
+    {
+        if (! (bool) $this->configValue('policy_aware_includes', true)) {
+            return true;
+        }
+
+        try {
+            $gate = Gate::getFacadeRoot();
+
+            if (! is_object($gate) || ! method_exists($gate, 'has') || ! $gate->has('viewRelation')) {
+                return true;
+            }
+
+            return Gate::allows('viewRelation', [$model, $relation]);
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
+    protected function strictIncludes(): bool
+    {
+        return (bool) $this->configValue('strict_includes', true);
+    }
+
     protected function normalizeParams(Request|array $request): array
     {
         if (! $request instanceof Request) {
-            return $request;
+            return $this->normalizeJsonApiParams($request);
         }
 
         $params = $request->all();
         $headerParams = $this->headerParams($request);
 
         if ($headerParams === []) {
-            return $params;
+            return $this->normalizeJsonApiParams($params);
         }
 
         if ($this->overrideRequestValuesWithHeaders()) {
-            return array_replace_recursive($params, $headerParams);
+            return $this->normalizeJsonApiParams(array_replace_recursive($params, $headerParams));
         }
 
-        return array_replace_recursive($headerParams, $params);
+        return $this->normalizeJsonApiParams(array_replace_recursive($headerParams, $params));
+    }
+
+    /**
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    protected function normalizeJsonApiParams(array $params): array
+    {
+        if (array_key_exists('filter', $params) && ! array_key_exists('filters', $params)) {
+            $params['filters'] = $params['filter'];
+        }
+
+        if (array_key_exists('include', $params) && ! array_key_exists('with', $params)) {
+            $params['with'] = $params['include'];
+        }
+
+        if (array_key_exists('sort', $params) && ! array_key_exists('sort_by', $params)) {
+            [$fields, $directions] = $this->normalizeJsonApiSort($params['sort']);
+            $params['sort_by'] = $fields;
+            $params['sort_dir'] = $directions;
+        }
+
+        if (isset($params['page']) && is_array($params['page'])) {
+            $page = $params['page'];
+
+            if (array_key_exists('size', $page) && ! array_key_exists('per_page', $params)) {
+                $params['per_page'] = $page['size'];
+            }
+
+            if (array_key_exists('number', $page)) {
+                $params['page'] = $page['number'];
+            } else {
+                unset($params['page']);
+            }
+        }
+
+        unset($params['filter'], $params['include'], $params['sort']);
+
+        return $params;
+    }
+
+    /**
+     * @return array{0: list<string>, 1: list<string>}
+     */
+    protected function normalizeJsonApiSort(mixed $sort): array
+    {
+        $fields = [];
+        $directions = [];
+
+        foreach ($this->stringOrArrayToArray($sort) as $field) {
+            $direction = str_starts_with($field, '-') ? 'desc' : 'asc';
+            $field = ltrim($field, '-');
+
+            if ($field === '') {
+                continue;
+            }
+
+            $fields[] = $field;
+            $directions[] = $direction;
+        }
+
+        return [$fields, $directions];
     }
 
     protected function resolveRequestParams(Builder $query, Request|array|null $request = null): array
@@ -946,6 +1153,10 @@ class QueryBuilderEngine
 
         if (array_key_exists('columns', $validated)) {
             $validated['columns'] = $this->validatedListInput('columns', $validated['columns'], $errors);
+        }
+
+        if (array_key_exists('fields', $validated)) {
+            $validated['fields'] = $this->validatedFields($validated['fields'], $errors);
         }
 
         if (array_key_exists('with', $validated)) {
@@ -1168,6 +1379,33 @@ class QueryBuilderEngine
 
     /**
      * @param  list<array{parameter: string, reason: string}>  $errors
+     * @return array<string, list<string>>
+     */
+    protected function validatedFields(mixed $fields, array &$errors): array
+    {
+        if (! is_array($fields)) {
+            $this->recordError($errors, 'fields', 'The [fields] value must be an associative array.');
+
+            return [];
+        }
+
+        $validated = [];
+
+        foreach ($fields as $resource => $columns) {
+            if (! is_string($resource) || trim($resource) === '') {
+                $this->recordError($errors, 'fields', 'Each sparse fieldset key must be a non-empty resource name.');
+
+                continue;
+            }
+
+            $validated[trim($resource)] = $this->stringOrArrayToArray($columns);
+        }
+
+        return $validated;
+    }
+
+    /**
+     * @param  list<array{parameter: string, reason: string}>  $errors
      */
     protected function validatedResponseKey(string $parameter, mixed $value, array &$errors): ?string
     {
@@ -1306,6 +1544,10 @@ class QueryBuilderEngine
 
     protected function modelArrayOption(Model $model, string $property): array
     {
+        if ($this->runtimeDefinition !== null && array_key_exists($property, $this->runtimeDefinition)) {
+            return (array) $this->runtimeDefinition[$property];
+        }
+
         return (array) $this->readModelProperty($model, $property, []);
     }
 
@@ -1325,7 +1567,7 @@ class QueryBuilderEngine
         $direction = $this->readModelProperty(
             $model,
             'defaultSortDir',
-            (string) config('query-builder.default_sort_direction', 'asc'),
+            (string) $this->configValue('default_sort_direction', 'asc'),
         );
 
         return strtolower($direction) === 'desc' ? 'desc' : 'asc';
@@ -1336,13 +1578,13 @@ class QueryBuilderEngine
         $default = (int) $this->readModelProperty(
             $model,
             'defaultPerPage',
-            (int) config('query-builder.default_per_page', 15),
+            (int) $this->configValue('default_per_page', 15),
         );
 
         $max = (int) $this->readModelProperty(
             $model,
             'maxPerPage',
-            (int) config('query-builder.max_per_page', 100),
+            (int) $this->configValue('max_per_page', 100),
         );
 
         return min(max((int) ($params['per_page'] ?? $default), 1), max($max, 1));
@@ -1350,22 +1592,31 @@ class QueryBuilderEngine
 
     protected function minSearchLength(): int
     {
-        return max((int) config('query-builder.min_search_length', 3), 1);
+        return max((int) $this->configValue('min_search_length', 3), 1);
     }
 
     protected function maxFilterCount(): int
     {
-        return max((int) config('query-builder.max_filter_count', 15), 1);
+        return max((int) $this->configValue('max_filter_count', 15), 1);
     }
 
     protected function maxRelationDepth(): int
     {
-        return max((int) config('query-builder.max_relation_depth', 3), 1);
+        $includeDepth = $this->configValue('max_include_depth', 3);
+        $relationDepth = $this->configValue('max_relation_depth', 3);
+        $defaultIncludeDepth = data_get($this->modernConfigDefaults(), 'max_include_depth', 3);
+        $defaultRelationDepth = data_get($this->legacyConfigDefaults(), 'max_relation_depth', 3);
+
+        if ((int) $includeDepth === (int) $defaultIncludeDepth && (int) $relationDepth !== (int) $defaultRelationDepth) {
+            return max((int) $relationDepth, 1);
+        }
+
+        return max((int) $includeDepth, 1);
     }
 
     protected function maxFilterValueCount(): int
     {
-        return max((int) config('query-builder.max_filter_value_count', 100), 1);
+        return max((int) $this->configValue('max_filter_value_count', 100), 1);
     }
 
     /**
@@ -1387,12 +1638,12 @@ class QueryBuilderEngine
 
     protected function searchLikeMode(): string
     {
-        return $this->validatedLikeMode((string) config('query-builder.search_like_mode', 'contains'));
+        return $this->validatedLikeMode((string) $this->configValue('search_like_mode', 'contains'));
     }
 
     protected function filterLikeMode(): string
     {
-        return $this->validatedLikeMode((string) config('query-builder.filter_like_mode', 'contains'));
+        return $this->validatedLikeMode((string) $this->configValue('filter_like_mode', 'contains'));
     }
 
     protected function operators(): array
@@ -1562,23 +1813,23 @@ class QueryBuilderEngine
         return (bool) $this->readModelProperty(
             $model,
             'queryBuilderStrict',
-            (bool) config('query-builder.strict_mode', false),
+            (bool) $this->configValue('strict_mode', false),
         );
     }
 
     protected function handleRequestAutomatically(): bool
     {
-        return (bool) config('query-builder.handle_request_automatically', true);
+        return (bool) $this->configValue('handle_request_automatically', true);
     }
 
     protected function queryHeadersEnabled(): bool
     {
-        return (bool) config('query-builder.query_headers.enabled', false);
+        return (bool) $this->configValue('query_headers.enabled', false);
     }
 
     protected function overrideRequestValuesWithHeaders(): bool
     {
-        return (bool) config('query-builder.query_headers.override_request_values', true);
+        return (bool) $this->configValue('query_headers.override_request_values', true);
     }
 
     /**
@@ -1586,7 +1837,7 @@ class QueryBuilderEngine
      */
     protected function queryHeaderNames(): array
     {
-        $configured = config('query-builder.query_headers.names', []);
+        $configured = $this->configValue('query_headers.names', []);
 
         if (! is_array($configured)) {
             return [];
@@ -1619,9 +1870,9 @@ class QueryBuilderEngine
     protected function resolveResponseOptions(Builder $query, array $response = []): array
     {
         $defaults = [
-            'status_key' => (string) config('query-builder.response.status_key', 'status'),
-            'status' => config('query-builder.response.status_value', true),
-            'message_key' => (string) config('query-builder.response.message_key', 'message'),
+            'status_key' => (string) $this->configValue('response.status_key', 'status'),
+            'status' => $this->configValue('response.status_value', true),
+            'message_key' => (string) $this->configValue('response.message_key', 'message'),
             'message' => null,
         ];
 
@@ -1692,6 +1943,22 @@ class QueryBuilderEngine
             };
         }
 
+        if (is_string($callback) && class_exists($callback)) {
+            $instance = app($callback);
+
+            if ($instance instanceof Filter) {
+                return static function (Builder $query, mixed $value) use ($instance): mixed {
+                    return $instance->apply($query, $value);
+                };
+            }
+        }
+
+        if ($callback instanceof Filter) {
+            return static function (Builder $query, mixed $value) use ($callback): mixed {
+                return $callback->apply($query, $value);
+            };
+        }
+
         if ($callback instanceof Closure) {
             return $callback;
         }
@@ -1729,7 +1996,39 @@ class QueryBuilderEngine
             return;
         }
 
-        throw new InvalidQueryBuilderQuery($errors);
+        throw $this->exceptionForErrors($errors);
+    }
+
+    /**
+     * @param  list<array{parameter: string, reason: string}>  $errors
+     */
+    protected function exceptionForErrors(array $errors): InvalidQueryBuilderQuery
+    {
+        $first = $errors[0] ?? ['parameter' => '', 'reason' => ''];
+        $parameter = (string) $first['parameter'];
+        $reason = strtolower((string) $first['reason']);
+
+        if (str_starts_with($parameter, 'filters')) {
+            return new InvalidFilterException($errors);
+        }
+
+        if (in_array($parameter, ['sort_by', 'sort_dir'], true)) {
+            return new InvalidSortException($errors);
+        }
+
+        if ($parameter === 'with') {
+            if (str_contains($reason, 'maximum relation depth')) {
+                return new IncludeDepthExceededException($errors);
+            }
+
+            if (str_contains($reason, 'not authorized')) {
+                return new UnauthorizedRelationException($errors);
+            }
+
+            return new InvalidIncludeException($errors);
+        }
+
+        return new InvalidQueryBuilderQuery($errors);
     }
 
     /**
@@ -1813,8 +2112,55 @@ class QueryBuilderEngine
         return static::$responseRegistry ??= new WeakMap;
     }
 
+    protected function configValue(string $key, mixed $default = null): mixed
+    {
+        $missing = new stdClass;
+        $legacy = config('query-builder.'.$key, $missing);
+        $modern = config('querybuilder.'.$key, $missing);
+        $legacyDefault = data_get($this->legacyConfigDefaults(), $key, $missing);
+        $modernDefault = data_get($this->modernConfigDefaults(), $key, $missing);
+
+        if ($legacy !== $missing && $legacyDefault !== $missing && $legacy !== $legacyDefault) {
+            return $legacy;
+        }
+
+        if ($modern !== $missing && $modernDefault !== $missing && $modern !== $modernDefault) {
+            return $modern;
+        }
+
+        if ($modern !== $missing) {
+            return $modern;
+        }
+
+        if ($legacy !== $missing) {
+            return $legacy;
+        }
+
+        return $default;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function legacyConfigDefaults(): array
+    {
+        return static::$legacyConfigDefaults ??= require __DIR__.'/../../config/query-builder.php';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    protected function modernConfigDefaults(): array
+    {
+        return static::$modernConfigDefaults ??= require __DIR__.'/../../config/querybuilder.php';
+    }
+
     protected function readModelProperty(Model $model, string $property, mixed $default = null): mixed
     {
+        if ($this->runtimeDefinition !== null && array_key_exists($property, $this->runtimeDefinition)) {
+            return $this->runtimeDefinition[$property];
+        }
+
         $reflection = $this->reflectionProperty($model, $property);
 
         if (! $reflection instanceof ReflectionProperty) {

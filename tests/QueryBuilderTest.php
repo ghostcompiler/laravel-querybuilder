@@ -2,12 +2,21 @@
 
 namespace GhostCompiler\LaravelQueryBuilder\Tests;
 
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidFilterException;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidIncludeException;
 use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidQueryBuilderQuery;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidSortException;
+use GhostCompiler\LaravelQueryBuilder\Exceptions\UnauthorizedRelationException;
+use GhostCompiler\LaravelQueryBuilder\Query;
 use GhostCompiler\LaravelQueryBuilder\Support\QueryBuilderEngine;
+use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Filters\ActiveUsersFilter;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\OpenUser;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\RiskyUser;
 use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Models\User;
+use GhostCompiler\LaravelQueryBuilder\Tests\Fixtures\Schemas\UserSchema;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Support\Facades\Gate;
 
 class QueryBuilderTest extends TestCase
 {
@@ -504,5 +513,270 @@ class QueryBuilderTest extends TestCase
             $this->assertSame('search', $exception->errors()[0]['parameter']);
             $this->assertStringContainsString('maximum relation depth', $exception->errors()[0]['reason']);
         }
+    }
+
+    public function test_fluent_query_applies_tenant_isolation(): void
+    {
+        $this->authenticateTenant(1);
+
+        $results = Query::for(User::class)
+            ->schema(UserSchema::class)
+            ->request([
+                'sort' => 'name',
+                'include' => 'profile',
+                'trashed' => 'with',
+            ])
+            ->get()
+            ->pluck('name')
+            ->all();
+
+        $this->assertSame(['Alice Doe', 'Bob Smith'], $results);
+    }
+
+    public function test_fluent_query_can_disable_tenant_isolation(): void
+    {
+        $this->authenticateTenant(1);
+
+        $results = Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'sort' => 'name',
+                'trashed' => 'with',
+            ])
+            ->get()
+            ->pluck('name')
+            ->all();
+
+        $this->assertSame(['Alice Doe', 'Bob Smith', 'Charlie Ray'], $results);
+    }
+
+    public function test_fluent_query_normalizes_json_api_filters_sorts_fields_and_pagination(): void
+    {
+        $payload = Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'filter' => [
+                    'name' => 'Alice',
+                ],
+                'sort' => '-created_at',
+                'fields' => [
+                    'users' => 'id,name,email',
+                ],
+                'page' => [
+                    'number' => 1,
+                    'size' => 1,
+                ],
+            ])
+            ->paginate();
+
+        $this->assertSame(1, $payload['meta']['per_page']);
+        $this->assertSame(1, $payload['meta']['current_page']);
+        $this->assertSame(1, $payload['meta']['total']);
+        $this->assertSame(['id', 'name', 'email'], array_keys($payload['data'][0]->getAttributes()));
+        $this->assertSame('Alice Doe', $payload['data'][0]->name);
+    }
+
+    public function test_fluent_query_masks_sensitive_columns(): void
+    {
+        config()->set('querybuilder.masked_columns', [
+            'users' => ['password'],
+        ]);
+
+        $user = Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'filter' => [
+                    'email' => 'alice@example.com',
+                ],
+            ])
+            ->first();
+
+        $this->assertNotNull($user);
+        $this->assertArrayHasKey('password', $user->getAttributes());
+        $this->assertArrayNotHasKey('password', $user->toArray());
+    }
+
+    public function test_fluent_query_rejects_masked_sparse_field_requests(): void
+    {
+        config()->set('querybuilder.masked_columns', [
+            'users' => ['password'],
+        ]);
+
+        try {
+            Query::for(User::class)
+                ->tenantScoped(false)
+                ->schema(UserSchema::class)
+                ->allowedFields(['id', 'name', 'email', 'password'])
+                ->request([
+                    'fields' => [
+                        'users' => 'id,password',
+                    ],
+                ])
+                ->get();
+
+            $this->fail('Expected masked sparse fields to be rejected.');
+        } catch (InvalidQueryBuilderQuery $exception) {
+            $this->assertSame('fields', $exception->errors()[0]['parameter']);
+        }
+    }
+
+    public function test_fluent_query_rejects_invalid_filters_in_strict_mode(): void
+    {
+        $this->expectException(InvalidFilterException::class);
+
+        Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'filter' => [
+                    'password' => 'secret',
+                ],
+            ])
+            ->get();
+    }
+
+    public function test_fluent_query_rejects_invalid_sorts_in_strict_mode(): void
+    {
+        $this->expectException(InvalidSortException::class);
+
+        Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'sort' => 'password',
+            ])
+            ->get();
+    }
+
+    public function test_fluent_query_validates_relation_existence_for_includes(): void
+    {
+        $this->expectException(InvalidIncludeException::class);
+
+        Query::for(User::class)
+            ->tenantScoped(false)
+            ->allowedIncludes(['missingRelation'])
+            ->request([
+                'include' => 'missingRelation',
+            ])
+            ->get();
+    }
+
+    public function test_fluent_query_blocks_overly_deep_includes(): void
+    {
+        config()->set('querybuilder.max_include_depth', 2);
+
+        $this->expectException(InvalidIncludeException::class);
+
+        Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->allowedIncludes(['roles.permissions.roles'])
+            ->request([
+                'include' => 'roles.permissions.roles',
+            ])
+            ->get();
+    }
+
+    public function test_fluent_query_blocks_policy_denied_includes_when_strict(): void
+    {
+        $this->authenticateTenant(1);
+
+        Gate::define('viewRelation', static fn (Authenticatable $user, User $model, string $relation): bool => $relation !== 'roles.permissions');
+
+        $this->expectException(UnauthorizedRelationException::class);
+
+        Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'include' => 'roles.permissions',
+            ])
+            ->get();
+    }
+
+    public function test_fluent_query_skips_policy_denied_includes_when_not_strict(): void
+    {
+        config()->set('querybuilder.strict_includes', false);
+        $this->authenticateTenant(1);
+
+        Gate::define('viewRelation', static fn (Authenticatable $user, User $model, string $relation): bool => $relation !== 'roles.permissions');
+
+        $user = Query::for(User::class)
+            ->tenantScoped(false)
+            ->schema(UserSchema::class)
+            ->request([
+                'include' => 'roles.permissions',
+                'filter' => [
+                    'email' => 'alice@example.com',
+                ],
+            ])
+            ->first();
+
+        $this->assertNotNull($user);
+        $this->assertFalse($user->relationLoaded('roles'));
+    }
+
+    public function test_fluent_query_supports_custom_filter_classes(): void
+    {
+        $results = Query::for(User::class)
+            ->tenantScoped(false)
+            ->allowedFilters([
+                'active' => ActiveUsersFilter::class,
+            ])
+            ->allowedSorts(['name'])
+            ->request([
+                'filter' => [
+                    'active' => true,
+                ],
+                'sort' => 'name',
+            ])
+            ->get()
+            ->pluck('name')
+            ->all();
+
+        $this->assertSame(['Alice Doe', 'Bob Smith'], $results);
+    }
+
+    protected function authenticateTenant(int $tenantId): void
+    {
+        auth()->guard()->setUser(new class($tenantId) implements Authenticatable
+        {
+            public function __construct(public int $tenant_id) {}
+
+            public function getAuthIdentifierName(): string
+            {
+                return 'id';
+            }
+
+            public function getAuthIdentifier(): int
+            {
+                return 1;
+            }
+
+            public function getAuthPassword(): string
+            {
+                return '';
+            }
+
+            public function getAuthPasswordName(): string
+            {
+                return 'password';
+            }
+
+            public function getRememberToken(): ?string
+            {
+                return null;
+            }
+
+            public function setRememberToken($value): void {}
+
+            public function getRememberTokenName(): string
+            {
+                return 'remember_token';
+            }
+        });
     }
 }

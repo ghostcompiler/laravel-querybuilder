@@ -2,7 +2,16 @@
 
 return [
     'strict_mode' => false,
+    'deny_unknown_filters' => true,
+    'deny_unknown_sorts' => true,
+    'deny_unknown_includes' => true,
     'handle_request_automatically' => true,
+    'tenant_scoping_enabled' => true,
+    'tenant_column' => 'tenant_id',
+    'mask_sensitive_columns' => true,
+    'masked_columns' => [],
+    'strict_includes' => true,
+    'policy_aware_includes' => true,
     'query_headers' => [
         'enabled' => false,
         'override_request_values' => true,
@@ -35,4 +44,6 @@ return [
     'max_filter_count' => 15,
     'max_filter_value_count' => 100,
     'max_relation_depth' => 3,
+    'max_include_depth' => 3,
+    'cache_prefix' => 'laravel-querybuilder',
 ];

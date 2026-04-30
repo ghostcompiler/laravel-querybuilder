@@ -12,6 +12,8 @@ return new class extends Migration
             $table->id();
             $table->string('name');
             $table->string('email')->unique();
+            $table->unsignedBigInteger('tenant_id')->nullable();
+            $table->string('password')->nullable();
             $table->string('status');
             $table->boolean('is_active')->default(true);
             $table->unsignedInteger('score')->default(0);

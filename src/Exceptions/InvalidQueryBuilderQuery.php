@@ -2,9 +2,7 @@
 
 namespace GhostCompiler\LaravelQueryBuilder\Exceptions;
 
-use InvalidArgumentException;
-
-class InvalidQueryBuilderQuery extends InvalidArgumentException
+class InvalidQueryBuilderQuery extends QueryBuilderException
 {
     /**
      * @param  list<array{parameter: string, reason: string}>  $errors

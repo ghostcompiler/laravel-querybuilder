@@ -78,6 +78,8 @@ abstract class TestCase extends Orchestra
         $alice = User::create([
             'name' => 'Alice Doe',
             'email' => 'alice@example.com',
+            'tenant_id' => 1,
+            'password' => 'hashed-secret-a',
             'status' => 'active',
             'is_active' => true,
             'score' => 95,
@@ -88,6 +90,8 @@ abstract class TestCase extends Orchestra
         $bob = User::create([
             'name' => 'Bob Smith',
             'email' => 'bob@example.com',
+            'tenant_id' => 1,
+            'password' => 'hashed-secret-b',
             'status' => 'active',
             'is_active' => true,
             'score' => 72,
@@ -98,6 +102,8 @@ abstract class TestCase extends Orchestra
         $charlie = User::create([
             'name' => 'Charlie Ray',
             'email' => 'charlie@example.com',
+            'tenant_id' => 2,
+            'password' => 'hashed-secret-c',
             'status' => 'inactive',
             'is_active' => false,
             'score' => 40,
