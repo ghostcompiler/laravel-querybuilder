@@ -14,23 +14,34 @@
 
 ## Overview
 
-Laravel Query Builder is built to help you expose flexible index endpoints without rewriting the same search, filter, sort, pagination, and eager-load logic in every controller.
+Laravel Query Builder helps API endpoints safely accept request query parameters for filtering, sorting, relation includes, sparse fieldsets, pagination, and table-style responses.
 
-It gives you:
+The package is designed around explicit allow lists. A request cannot filter, sort, include, or select fields unless your model, schema, or fluent query definition permits it.
 
-- one trait for reusable model query handling
-- global search on model and nested relation columns
-- per-field filters with supported operators
-- one-level relation sorting
-- eager-load allow lists
-- selective column output
-- soft-delete handling
-- API-ready pagination metadata
-- optional strict mode for invalid query parameters
-- custom filter callbacks for app-specific logic
-- per-field allowed filter operators
-- deny-by-default request allow-lists for filters, sorts, includes, and selected columns
-- central request sanitization and validation before query clauses are applied
+Use it when you want:
+
+- schema-driven filtering, sorting, includes, and fields
+- tenant-aware query scoping
+- safe JSON:API-style query strings
+- strict rejection of unknown filters, sorts, includes, and fields
+- relation include validation
+- optional policy-aware relation includes
+- sensitive column masking before serialization
+- custom filter classes and callbacks
+- legacy trait-based helpers for existing models
+- pagination metadata formatted for API responses
+
+## Quick Links
+
+- [Installation](#installation)
+- [Fluent API Quick Start](#fluent-api-quick-start)
+- [Schema Classes](#schema-classes)
+- [JSON:API Query Syntax](#jsonapi-query-syntax)
+- [Legacy Trait API](#legacy-trait-api)
+- [Configuration](#configuration)
+- [Security Model](#security-model)
+- [Function Reference](#function-reference)
+- [Functions Index](FUNCTIONS.md)
 
 ## Compatibility
 
@@ -42,22 +53,41 @@ It gives you:
 
 ## Installation
 
-### Install from Packagist
+Install from Packagist:
 
 ```bash
 composer require ghostcompiler/laravel-querybuilder
 ```
 
-### Install from a local package path
+Laravel package discovery registers the service provider automatically.
 
-If you are developing this package locally and want to use it inside a Laravel app before publishing it to Packagist, add a path repository to the consuming Laravel app's `composer.json`:
+To publish the legacy config filename:
+
+```bash
+php artisan vendor:publish --tag=query-builder-config
+```
+
+To publish the modern config filename:
+
+```bash
+php artisan vendor:publish --tag=querybuilder-config
+```
+
+Both config files contain the same defaults. The package reads both `query-builder` and `querybuilder` config keys for compatibility.
+
+### Local Path Install
+
+If you are developing the package locally inside another Laravel app:
 
 ```json
 {
     "repositories": [
         {
             "type": "path",
-            "url": "/absolute/path/to/laravel-querybuilder"
+            "url": "/absolute/path/to/laravel-querybuilder",
+            "options": {
+                "symlink": true
+            }
         }
     ],
     "require": {
@@ -72,46 +102,583 @@ Then run:
 composer update ghostcompiler/laravel-querybuilder
 ```
 
-If you want live local changes to reflect immediately, enable symlinks:
+## Fluent API Quick Start
 
-```json
+The fluent API is the recommended interface for new code.
+
+```php
+use GhostCompiler\LaravelQueryBuilder\Query;
+
+Route::get('/users', function () {
+    return Query::for(User::class)
+        ->tenantScoped()
+        ->schema(UserSchema::class)
+        ->allowedIncludes()
+        ->allowedFilters()
+        ->allowedSorts()
+        ->paginate();
+});
+```
+
+Example request:
+
+```text
+/users?filter[name]=john&include=roles.permissions&sort=-created_at&fields[users]=id,name,email&page[number]=1&page[size]=15
+```
+
+The fluent API runs in strict mode for its runtime definition. Unknown filters, sorts, includes, and disallowed field requests throw typed query-builder exceptions.
+
+## Schema Classes
+
+Schemas centralize the public query contract for a model.
+
+```php
+use GhostCompiler\LaravelQueryBuilder\QuerySchema;
+
+class UserSchema extends QuerySchema
 {
-    "repositories": [
-        {
-            "type": "path",
-            "url": "/absolute/path/to/laravel-querybuilder",
-            "options": {
-                "symlink": true
-            }
-        }
-    ]
+    public function filters(): array
+    {
+        return ['name', 'email'];
+    }
+
+    public function sorts(): array
+    {
+        return ['created_at', 'name'];
+    }
+
+    public function includes(): array
+    {
+        return ['roles.permissions', 'profile'];
+    }
+
+    public function fields(): array
+    {
+        return ['id', 'name', 'email'];
+    }
 }
 ```
 
-## Package Setup
+Use the schema:
 
-Laravel package discovery is already enabled through Composer, so the service provider is discovered automatically.
-
-If you want to publish the config file:
-
-```bash
-php artisan vendor:publish --tag=query-builder-config
+```php
+Query::for(User::class)
+    ->schema(UserSchema::class)
+    ->paginate();
 ```
 
-That publishes:
+Schema instances are cached by class name during the request lifecycle.
+
+## Allowed Filters
+
+You can define filters in a schema:
+
+```php
+use GhostCompiler\LaravelQueryBuilder\Filters\AllowedFilter;
+
+class UserSchema extends QuerySchema
+{
+    public function filters(): array
+    {
+        return [
+            'email',
+            AllowedFilter::exact('status'),
+            AllowedFilter::partial('name'),
+            AllowedFilter::scope('active'),
+            AllowedFilter::custom('high_score', HighScoreFilter::class),
+        ];
+    }
+}
+```
+
+Or define filters directly:
+
+```php
+Query::for(User::class)
+    ->allowedFilters([
+        'email',
+        AllowedFilter::partial('name'),
+        'active' => ActiveUsersFilter::class,
+    ])
+    ->get();
+```
+
+Supported filter styles:
+
+- `AllowedFilter::exact('status')`
+- `AllowedFilter::partial('name')`
+- `AllowedFilter::scope('active')`
+- `AllowedFilter::custom('active', ActiveUsersFilter::class)`
+- string shorthand: `'email'`
+- array shorthand: `'name' => 'partial'`
+- class shorthand: `'active' => ActiveUsersFilter::class`
+
+Query examples:
 
 ```text
-config/query-builder.php
+/users?filter[email]=alice@example.com
+/users?filter[name]=ali
+/users?filter[active]=true
 ```
 
-## Config File
+## Custom Filter Classes
 
-The package config supports these defaults:
+Create a filter class:
+
+```php
+use GhostCompiler\LaravelQueryBuilder\Contracts\Filter;
+use Illuminate\Database\Eloquent\Builder;
+
+class ActiveUsersFilter implements Filter
+{
+    public function apply(Builder $query, mixed $value)
+    {
+        return $query->where('active', filter_var($value, FILTER_VALIDATE_BOOL));
+    }
+}
+```
+
+Register it:
+
+```php
+Query::for(User::class)
+    ->allowedFilters([
+        'active' => ActiveUsersFilter::class,
+    ])
+    ->get();
+```
+
+Custom filters are trusted code. Avoid raw SQL with unsanitized request values.
+
+## Allowed Sorts
+
+Schema example:
+
+```php
+public function sorts(): array
+{
+    return ['name', 'created_at'];
+}
+```
+
+Direct example:
+
+```php
+Query::for(User::class)
+    ->allowedSorts(['name', 'created_at'])
+    ->get();
+```
+
+Query examples:
+
+```text
+/users?sort=name
+/users?sort=-created_at
+/users?sort=name,-created_at
+```
+
+The package rejects non-allow-listed sort fields with `InvalidSortException` in strict mode.
+
+## Allowed Includes
+
+Schema example:
+
+```php
+public function includes(): array
+{
+    return ['profile', 'roles.permissions'];
+}
+```
+
+Direct example:
+
+```php
+Query::for(User::class)
+    ->allowedIncludes(['profile', 'roles.permissions'])
+    ->get();
+```
+
+Query example:
+
+```text
+/users?include=profile,roles.permissions
+```
+
+Includes are validated against:
+
+- the explicit include allow list
+- relation existence on the model
+- configured maximum include depth
+- optional `viewRelation` gate policy checks
+
+## Policy-Aware Includes
+
+If a `viewRelation` gate ability is defined, the package checks it before eager loading a requested include:
+
+```php
+use Illuminate\Support\Facades\Gate;
+
+Gate::define('viewRelation', function ($user, $model, string $relation) {
+    return $relation !== 'roles.permissions' || $user->can('viewPermissions');
+});
+```
+
+If the gate denies the relation:
+
+- strict includes enabled: `UnauthorizedRelationException`
+- strict includes disabled: relation is skipped silently
+
+If no `viewRelation` ability exists, the package assumes route/controller/model authorization is handled by the application.
+
+## Sparse Fieldsets
+
+Schema example:
+
+```php
+public function fields(): array
+{
+    return ['id', 'name', 'email'];
+}
+```
+
+Request example:
+
+```text
+/users?fields[users]=id,name,email
+```
+
+Sparse fieldsets are validated against allowed fields and masked columns. The model primary key is automatically kept when needed.
+
+## Column Masking
+
+Configure sensitive columns:
+
+```php
+'masked_columns' => [
+    'users' => ['password', 'remember_token'],
+    'oauth_clients' => ['secret'],
+],
+```
+
+When `mask_sensitive_columns` is enabled, matching attributes are hidden before serialization, including loaded relations.
+
+Masked columns are also removed from selectable sparse fieldsets.
+
+## Tenant Scoping
+
+Tenant scoping is enabled by default for the fluent API if the model table has the configured tenant column.
+
+```php
+Query::for(User::class)
+    ->tenantScoped()
+    ->schema(UserSchema::class)
+    ->get();
+```
+
+This applies:
+
+```php
+where('tenant_id', auth()->user()->tenant_id)
+```
+
+Disable it for a trusted system query:
+
+```php
+Query::for(User::class)
+    ->tenantScoped(false)
+    ->schema(UserSchema::class)
+    ->get();
+```
+
+Use a custom tenant column:
+
+```php
+Query::for(User::class)
+    ->tenantScoped(true, 'account_id')
+    ->schema(UserSchema::class)
+    ->get();
+```
+
+Or configure it globally:
+
+```php
+'tenant_column' => 'account_id',
+```
+
+## JSON:API Query Syntax
+
+The fluent API normalizes JSON:API-style request parameters:
+
+```text
+filter[name]=john
+include=roles.permissions
+sort=-created_at
+fields[users]=id,name,email
+page[number]=1
+page[size]=15
+```
+
+Equivalent normalized structure:
+
+```php
+[
+    'filters' => ['name' => 'john'],
+    'with' => ['roles.permissions'],
+    'sort_by' => ['created_at'],
+    'sort_dir' => ['desc'],
+    'fields' => ['users' => ['id', 'name', 'email']],
+    'page' => 1,
+    'per_page' => 15,
+]
+```
+
+Legacy parameter names are still supported:
+
+```text
+filters[name]=john
+with=roles.permissions
+sort_by=created_at
+sort_dir=desc
+columns=id,name,email
+page=1
+per_page=15
+```
+
+## Pagination
+
+The fluent `paginate()` method returns a JSON-friendly array:
+
+```php
+$payload = Query::for(User::class)
+    ->schema(UserSchema::class)
+    ->paginate();
+```
+
+Shape:
+
+```php
+[
+    'data' => [...],
+    'meta' => [
+        'total' => 50,
+        'per_page' => 15,
+        'current_page' => 1,
+        'last_page' => 4,
+    ],
+    'links' => [
+        'first' => '...',
+        'last' => '...',
+        'prev' => null,
+        'next' => '...',
+    ],
+]
+```
+
+Override per-page:
+
+```php
+Query::for(User::class)
+    ->schema(UserSchema::class)
+    ->paginate(25);
+```
+
+## Query Cache
+
+Cache a terminal operation:
+
+```php
+Query::for(User::class)
+    ->schema(UserSchema::class)
+    ->cache(60)
+    ->paginate();
+```
+
+The cache key includes the operation, model, request parameters, and runtime definition.
+
+## Fluent Terminal Methods
+
+```php
+Query::for(User::class)->schema(UserSchema::class)->get();
+Query::for(User::class)->schema(UserSchema::class)->first();
+Query::for(User::class)->schema(UserSchema::class)->paginate();
+Query::for(User::class)->schema(UserSchema::class)->toEloquentBuilder();
+```
+
+`get()`, `first()`, and `paginate()` execute the query. `toEloquentBuilder()` applies the request rules and returns the underlying Eloquent builder for further trusted server-side work.
+
+## Legacy Trait API
+
+Existing projects can keep using the model trait.
+
+```php
+use GhostCompiler\LaravelQueryBuilder\Concerns\HasQueryBuilder;
+use Illuminate\Database\Eloquent\Model;
+
+class User extends Model
+{
+    use HasQueryBuilder;
+
+    protected array $searchable = ['name', 'email', 'profile.bio'];
+    protected array $filterable = ['status', 'roles.name'];
+    protected array $sortable = ['name', 'created_at', 'profile.city'];
+    protected array $selectable = ['id', 'name', 'email'];
+    protected array $allowedRelations = ['profile', 'roles.permissions'];
+}
+```
+
+Static builder:
+
+```php
+$query = User::QueryBuild($request);
+```
+
+Local scope:
+
+```php
+$query = User::query()->queryBuilder($request);
+```
+
+Paginator:
+
+```php
+$paginator = User::query()->queryBuilder($request)->paginateQuery();
+```
+
+Table payload:
+
+```php
+$payload = User::query()->queryBuilder($request)->paginateTable();
+```
+
+The legacy trait API uses model properties and `query-builder.strict_mode` to decide whether invalid input throws or is ignored.
+
+## Legacy Model Options
+
+Supported model properties:
+
+```php
+protected array $searchable = ['name', 'email', 'profile.bio'];
+protected array $filterable = ['status', 'roles.name'];
+protected array $sortable = ['name', 'created_at'];
+protected array $selectable = ['id', 'name', 'email'];
+protected array $allowedRelations = ['profile', 'roles.permissions'];
+protected array $allowedFilterOperators = [
+    'status' => ['=', 'in'],
+];
+protected array $dateFilterable = ['created_at'];
+protected array $customFilters = [
+    'high_score' => 'applyHighScoreFilter',
+];
+protected string $defaultSortBy = 'created_at';
+protected string $defaultSortDir = 'desc';
+protected int $defaultPerPage = 15;
+protected int $maxPerPage = 100;
+protected bool $queryBuilderStrict = true;
+```
+
+Custom model callback:
+
+```php
+protected function applyHighScoreFilter($query, mixed $value): void
+{
+    if (filter_var($value, FILTER_VALIDATE_BOOL)) {
+        $query->where('score', '>=', 90);
+    }
+}
+```
+
+## Legacy Request Parameters
+
+| Parameter | Example | Purpose |
+| :--- | :--- | :--- |
+| `search` | `?search=alice` | Global search across `$searchable`. |
+| `filters` | `?filters[status]=active` | Allow-listed field filters. |
+| `sort_by` | `?sort_by=created_at` | Allow-listed sort fields. |
+| `sort_dir` | `?sort_dir=desc` | Sort direction. |
+| `with` | `?with=profile,roles` | Allow-listed eager loads. |
+| `columns` | `?columns=id,name,email` | Allow-listed selected columns. |
+| `page` | `?page=2` | Page number. |
+| `per_page` | `?per_page=25` | Page size, capped by config/model max. |
+| `date_from` | `?date_from=2025-01-01` | Start date boundary. |
+| `date_to` | `?date_to=2025-12-31` | End date boundary. |
+| `date_column` | `?date_column=created_at` | Date column, validated by allow list. |
+| `trashed` | `?trashed=with` | Soft-delete handling: `with` or `only`. |
+
+## Filter Operators
+
+Legacy operator syntax:
+
+```text
+filters[score][operator]=>=
+filters[score][value]=90
+```
+
+Supported operators:
+
+- `=`
+- `!=`
+- `<`
+- `>`
+- `<=`
+- `>=`
+- `like`
+- `not_like`
+- `in`
+- `not_in`
+- `between`
+- `null`
+- `not_null`
+
+Restrict operators per field:
+
+```php
+protected array $allowedFilterOperators = [
+    'status' => ['=', 'in'],
+    'score' => ['>=', 'between'],
+];
+```
+
+## Header-Based Query Input
+
+Enable headers:
+
+```php
+'query_headers' => [
+    'enabled' => true,
+    'override_request_values' => true,
+],
+```
+
+Example headers:
+
+```text
+X-Query-Search: Alice
+X-Query-Filter: {"status":"active"}
+X-Query-Sort: created_at
+X-Query-Sort-Dir: desc
+X-Query-With: profile
+X-Query-Per-Page: 15
+```
+
+Header values are normalized and validated through the same engine as query-string parameters.
+
+## Configuration
+
+Default config:
 
 ```php
 return [
     'strict_mode' => false,
+    'deny_unknown_filters' => true,
+    'deny_unknown_sorts' => true,
+    'deny_unknown_includes' => true,
     'handle_request_automatically' => true,
+    'tenant_scoping_enabled' => true,
+    'tenant_column' => 'tenant_id',
+    'mask_sensitive_columns' => true,
+    'masked_columns' => [],
+    'strict_includes' => true,
+    'policy_aware_includes' => true,
     'query_headers' => [
         'enabled' => false,
         'override_request_values' => true,
@@ -144,713 +711,362 @@ return [
     'max_filter_count' => 15,
     'max_filter_value_count' => 100,
     'max_relation_depth' => 3,
+    'max_include_depth' => 3,
+    'cache_prefix' => 'laravel-querybuilder',
 ];
 ```
 
-Meaning of the request-handling option:
+Important options:
 
-- `handle_request_automatically`
-  When `true`, `paginateQuery()` and `paginateTable()` can fall back to Laravel's current request automatically if no explicit request was passed and nothing was already remembered from `queryBuilder($request)`.
-- `query_headers.enabled`
-  When `true`, the package also reads query-builder instructions from configured request headers.
-- `query_headers.override_request_values`
-  When `true`, matching query-builder headers override URL/request values. When `false`, request query values win and headers only fill missing keys.
-- `query_headers.names`
-  Lets you rename which headers map to `search`, `filters`, `sort_by`, `with`, `page`, and the other supported query-builder parameters.
-- `strict_mode`
-  When `true`, invalid request keys, invalid request shapes, invalid operators, invalid includes, invalid sort fields, and similar request problems throw an exception instead of being silently ignored.
-- `response.status_value`
-  Controls the default value returned in the `status` field. You can keep it as `true` or change it to a custom value like `'success'`.
-- `response.status_key`
-  Lets you rename the response status key if your API uses a different key name.
-- `response.message_key`
-  Lets you rename the response message key.
-- `search_like_mode`
-  Controls how global search builds the `LIKE` pattern. Supported values: `contains`, `starts_with`, `ends_with`, `exact`.
-- `filter_like_mode`
-  Controls how `like` and `not_like` filters build their `LIKE` patterns.
-- `max_filter_value_count`
-  Caps the number of values allowed in `in` and `not_in` style filters to avoid oversized query lists.
-- `max_relation_depth`
-  Limits how deep dotted relation paths can go for request-driven includes, filters, and searchable relation fields.
+- `strict_mode`: makes the legacy trait API throw on invalid query input.
+- `tenant_scoping_enabled`: enables default tenant scoping in the fluent API when the tenant column exists.
+- `tenant_column`: tenant column used with `auth()->user()`.
+- `mask_sensitive_columns`: hides configured columns before serialization.
+- `masked_columns`: table or model keyed sensitive columns.
+- `strict_includes`: controls whether policy-denied includes throw or are skipped.
+- `policy_aware_includes`: enables `Gate::allows('viewRelation', [$model, $relation])`.
+- `max_include_depth`: caps dotted include depth.
+- `max_relation_depth`: legacy relation-depth cap for dotted relation paths.
+- `cache_prefix`: prefix for fluent query cache keys.
 
-## Step 1: Add the Trait to a Model
+## Exception Types
+
+All package exceptions extend `QueryBuilderException`.
+
+| Exception | When it is used |
+| :--- | :--- |
+| `InvalidFilterException` | Unknown filter, unsupported operator, invalid filter shape, or disallowed filter. |
+| `InvalidIncludeException` | Unknown, disallowed, or missing relation include. |
+| `InvalidSortException` | Unknown or disallowed sort field/direction. |
+| `UnauthorizedRelationException` | `viewRelation` gate denies an include in strict include mode. |
+| `IncludeDepthExceededException` | Requested include exceeds configured depth. |
+| `InvalidQueryBuilderQuery` | General invalid query-builder input. |
+
+Read validation errors:
 
 ```php
-<?php
-
-namespace App\Models;
-
-use GhostCompiler\LaravelQueryBuilder\Concerns\HasQueryBuilder;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
-
-class User extends Model
-{
-    use HasQueryBuilder;
-    use SoftDeletes;
-
-    protected array $searchable = [
-        'name',
-        'email',
-        'profile.bio',
-        'roles.name',
-        'roles.permissions.name',
-    ];
-
-    protected array $sortable = [
-        'id',
-        'name',
-        'created_at',
-        'profile.city',
-    ];
-
-    protected array $selectable = [
-        'id',
-        'name',
-        'email',
-    ];
-
-    protected array $filterable = [
-        'status',
-        'score',
-        'created_at',
-        'roles.name',
-        'profile.country',
-        'profile.is_public',
-    ];
-
-    protected array $dateFilterable = [
-        'created_at',
-    ];
-
-    protected array $allowedRelations = [
-        'profile',
-        'roles',
-        'roles.permissions',
-        'posts',
-    ];
-
-    protected array $allowedFilterOperators = [
-        'status' => ['=', 'in'],
-        'score' => ['=', '>=', 'between'],
-        'roles.name' => ['='],
-        'profile.country' => ['='],
-        'profile.is_public' => ['=', '!=', 'in', 'not_in'],
-        'is_high_score' => ['='],
-    ];
-
-    protected array $customFilters = [
-        'is_high_score' => 'applyHighScoreFilter',
-    ];
-
-    protected bool $queryBuilderStrict = false;
-
-    protected int $defaultPerPage = 15;
-    protected int $maxPerPage = 100;
-    protected string $defaultSortBy = 'created_at';
-    protected string $defaultSortDir = 'desc';
-
-    protected function applyHighScoreFilter($query, mixed $value): void
-    {
-        if (filter_var($value, FILTER_VALIDATE_BOOL)) {
-            $query->where('users.score', '>=', 90);
-        }
-    }
+try {
+    Query::for(User::class)->schema(UserSchema::class)->get();
+} catch (InvalidQueryBuilderQuery $exception) {
+    return response()->json([
+        'errors' => $exception->errors(),
+    ], 422);
 }
 ```
 
-## Step 2: Use It in a Controller
+## Security Model
+
+The package is secure-by-default for query shaping in the fluent API:
+
+- filters must be allow-listed
+- sorts must be allow-listed
+- includes must be allow-listed
+- sparse fieldsets must be allow-listed
+- masked columns are hidden before serialization
+- nested includes are depth-limited
+- requested includes must exist as model relations
+- optional policy checks can block specific relations
+- standard values are passed through Eloquent/PDO bindings
+
+The package does not replace:
+
+- user authentication
+- route middleware
+- controller authorization
+- model policies
+- business-specific data visibility rules
+
+Custom filters are application code. Keep them parameterized and avoid unsafe raw SQL.
+
+## Performance Notes
+
+- Include only relations that are needed by the endpoint.
+- Index columns used by filters and sorts.
+- Keep `max_include_depth` low for public APIs.
+- Use sparse fieldsets to reduce payload size.
+- Use cache only for endpoints where user, tenant, and permission context are safe to cache.
+- Prefer schema classes for stable public query contracts.
+
+## Function Reference
+
+The full clickable method list is also available in [FUNCTIONS.md](FUNCTIONS.md).
+
+<a id="query-for"></a>
+### `Query::for()`
+
+Create a fluent query builder for a model class or an existing Eloquent builder.
 
 ```php
-<?php
+Query::for(User::class);
+Query::for(User::query()->where('active', true));
+```
 
-namespace App\Http\Controllers;
+<a id="query-extend"></a>
+### `Query::extend()`
 
-use App\Models\User;
-use Illuminate\Http\Request;
+Register or read extension values by contract name.
 
-class UserController
+```php
+Query::extend(Filter::class, ActiveUsersFilter::class);
+$extensions = Query::extend(Filter::class);
+```
+
+<a id="schema"></a>
+### `schema()`
+
+Attach a `QuerySchema` class or instance.
+
+```php
+Query::for(User::class)->schema(UserSchema::class);
+```
+
+<a id="allowed-filters"></a>
+### `allowedFilters()`
+
+Override schema filters directly.
+
+```php
+Query::for(User::class)->allowedFilters(['email', AllowedFilter::partial('name')]);
+```
+
+<a id="allowed-sorts"></a>
+### `allowedSorts()`
+
+Override schema sorts directly.
+
+```php
+Query::for(User::class)->allowedSorts(['name', 'created_at']);
+```
+
+<a id="allowed-includes"></a>
+### `allowedIncludes()`
+
+Override schema includes directly.
+
+```php
+Query::for(User::class)->allowedIncludes(['profile', 'roles.permissions']);
+```
+
+<a id="allowed-fields"></a>
+### `allowedFields()`
+
+Override schema sparse fieldset columns directly.
+
+```php
+Query::for(User::class)->allowedFields(['id', 'name', 'email']);
+```
+
+<a id="tenant-scoped"></a>
+### `tenantScoped()`
+
+Enable, disable, or customize tenant isolation.
+
+```php
+Query::for(User::class)->tenantScoped();
+Query::for(User::class)->tenantScoped(false);
+Query::for(User::class)->tenantScoped(true, 'account_id');
+```
+
+<a id="request"></a>
+### `request()`
+
+Provide request input manually.
+
+```php
+Query::for(User::class)->request(request());
+Query::for(User::class)->request(['filter' => ['name' => 'Alice']]);
+```
+
+<a id="cache"></a>
+### `cache()`
+
+Cache a terminal query operation for the given number of seconds.
+
+```php
+Query::for(User::class)->schema(UserSchema::class)->cache(60)->paginate();
+```
+
+<a id="to-eloquent-builder"></a>
+### `toEloquentBuilder()`
+
+Apply request rules and return the underlying Eloquent builder.
+
+```php
+$builder = Query::for(User::class)->schema(UserSchema::class)->toEloquentBuilder();
+```
+
+<a id="get"></a>
+### `get()`
+
+Execute and return an Eloquent collection.
+
+```php
+$users = Query::for(User::class)->schema(UserSchema::class)->get();
+```
+
+<a id="first"></a>
+### `first()`
+
+Execute and return the first model or `null`.
+
+```php
+$user = Query::for(User::class)->schema(UserSchema::class)->first();
+```
+
+<a id="paginate"></a>
+### `paginate()`
+
+Execute and return a JSON-friendly pagination array.
+
+```php
+$payload = Query::for(User::class)->schema(UserSchema::class)->paginate();
+$payload = Query::for(User::class)->schema(UserSchema::class)->paginate(25);
+```
+
+<a id="allowed-filter-exact"></a>
+### `AllowedFilter::exact()`
+
+Allow exact matching for a filter.
+
+```php
+AllowedFilter::exact('status');
+```
+
+<a id="allowed-filter-partial"></a>
+### `AllowedFilter::partial()`
+
+Allow partial `LIKE` matching for a filter.
+
+```php
+AllowedFilter::partial('name');
+```
+
+<a id="allowed-filter-scope"></a>
+### `AllowedFilter::scope()`
+
+Call an Eloquent local scope.
+
+```php
+AllowedFilter::scope('active');
+AllowedFilter::scope('active_users', 'active');
+```
+
+<a id="allowed-filter-custom"></a>
+### `AllowedFilter::custom()`
+
+Use a custom filter class, instance, callback, or callable.
+
+```php
+AllowedFilter::custom('active', ActiveUsersFilter::class);
+```
+
+<a id="filter-apply"></a>
+### `Filter::apply()`
+
+Implement a custom filter.
+
+```php
+public function apply(Builder $query, mixed $value)
 {
-    public function index(Request $request)
-    {
-        return User::queryBuilder($request)->paginateTable();
-    }
+    return $query->where('active', true);
 }
 ```
 
-Backward-compatible static usage also works:
+<a id="query-schema-methods"></a>
+### `QuerySchema` Methods
+
+Define allowed query surface.
 
 ```php
-User::QueryBuild($request)->paginateTable();
+public function filters(): array;
+public function sorts(): array;
+public function includes(): array;
+public function fields(): array;
+public function filterOperators(): array;
+public function customFilters(): array;
 ```
 
-But you no longer need to pass it twice.
+<a id="trait-querybuild"></a>
+### `QueryBuild()`
 
-If you want to add a custom response message once and keep the package response format:
+Legacy static trait entry point.
 
 ```php
-User::queryBuilder($request, [
-    'message' => 'Users fetched successfully.',
-])->paginateTable();
+$query = User::QueryBuild($request);
 ```
 
-If you want fully automatic request handling:
+<a id="trait-querybuilder"></a>
+### `queryBuilder()`
+
+Legacy local scope.
 
 ```php
-User::query()->paginateTable();
+$query = User::query()->queryBuilder($request);
 ```
 
-That works when `handle_request_automatically` is enabled in config.
+<a id="trait-paginate-query"></a>
+### `paginateQuery()`
 
-## Step 3: Available Query Parameters
-
-These parameters can be passed through:
-
-- `User::queryBuilder($request)`
-- the current Laravel request if `handle_request_automatically` is enabled
-- configured request headers if `query_headers.enabled` is enabled
-
-Security note:
-
-- `search` only works for fields in `$searchable`
-- `filters` only work for fields in `$filterable` or `$customFilters`
-- `date_column` only works for fields in `$dateFilterable` when that allow-list is defined, otherwise it falls back to `$filterable`
-- `sort_by` only works for fields in `$sortable`
-- `columns` only works for fields in `$selectable`
-- `with` only works for relations in `$allowedRelations`
-- soft-delete state should be controlled through `trashed`, not direct `deleted_at` filters
-
-If you do not define those allow-lists, the package now denies those request-driven features by default instead of allowing everything.
-
-## Step 4: Request Validation and Sanitization
-
-Before the package touches the query, it sanitizes and validates incoming request parameters.
-
-What is validated:
-
-- unsupported top-level query-builder keys are rejected in strict mode
-- `page` and `per_page` must be valid integers
-- `filters` must be an associative array
-- `with` must be a string or array of strings
-- `sort_by`, `sort_dir`, and `columns` must be strings or string arrays
-- `search`, `date_from`, `date_to`, `date_column`, and `trashed` must be scalar values
-- response keys like `status_key` and `message_key` are validated before use
-- large `in` and `not_in` filter lists are capped to the configured safe limit
-- dotted relation filters and search fields are capped by `max_relation_depth`
-
-This means the package does not blindly trust `request()->all()` and inject values directly into query methods.
-
-### Header-based query overrides
-
-If you want to keep the URL clean, avoid very long query strings, or send richer query-builder instructions from React, you can enable header support:
+Legacy paginator scope.
 
 ```php
-'query_headers' => [
-    'enabled' => true,
-    'override_request_values' => true,
-],
+$paginator = User::query()->queryBuilder($request)->paginateQuery();
 ```
 
-Supported by default:
+<a id="trait-paginate-table"></a>
+### `paginateTable()`
 
-- `X-Query-Search`
-- `X-Query-Filter` or `X-Query-Filters`
-- `X-Query-Sort` or `X-Query-Sort-By`
-- `X-Query-Sort-Dir`
-- `X-Query-Page`
-- `X-Query-Per-Page`
-- `X-Query-Date-From`
-- `X-Query-Date-To`
-- `X-Query-Date-Column`
-- `X-Query-Columns`
-- `X-Query-With`, `X-Query-Include`, `X-Query-Includes`
-- `X-Query-Trashed`
-
-Recommended header payload formats:
-
-- scalar values as plain strings
-- list values like `with` or `columns` as comma-separated strings or JSON arrays
-- `filters` as a JSON object
-
-Example:
-
-```http
-X-Query-Search: admin
-X-Query-Sort: created_at
-X-Query-Sort-Dir: desc
-X-Query-Per-Page: 20
-X-Query-Filter: {"status":"active","roles.name":{"operator":"=","value":"Admin"}}
-X-Query-With: ["profile","roles.permissions"]
-```
-
-Precedence rule:
-
-- if `override_request_values=true`, headers win over matching URL/request keys
-- if `override_request_values=false`, URL/request keys win and headers only fill missing values
-
-This also avoids reserved-key collisions because query-builder commands stay at the top level while model data filters stay inside `filters[...]` or `X-Query-Filter`.
-
-### Strict validation behavior
-
-If strict mode is enabled:
+Legacy table response scope.
 
 ```php
-'strict_mode' => true,
+$payload = User::query()->queryBuilder($request)->paginateTable();
 ```
 
-the package throws:
+<a id="exception-errors"></a>
+### `InvalidQueryBuilderQuery::errors()`
+
+Read validation error details from a thrown query-builder exception.
 
 ```php
-GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidQueryBuilderQuery
+$errors = $exception->errors();
 ```
 
-for invalid request shapes or disallowed query operations.
+<a id="engine-methods"></a>
+### `QueryBuilderEngine` Methods
 
-If strict mode is disabled, invalid values are sanitized or ignored and the query continues safely.
-
-### Basic pagination
-
-```text
-?page=2
-?per_page=25
-```
-
-`per_page` is always clamped to the configured `max_per_page` or the model's `$maxPerPage` value, so oversized requests cannot force unbounded pagination sizes.
-
-### Global search
-
-```text
-?search=john
-```
-
-This searches across the fields listed in `$searchable`.
-
-Search conditions are wrapped in their own grouped `where (...)` clause, so when search is combined with filters the resulting logic stays scoped correctly:
-
-```text
-(filters...) AND (search-column-1 OR search-column-2 OR relation-search...)
-```
-
-For large production datasets, especially on related tables, prefer indexed and selective columns in `$searchable`.
-
-### Sorting
-
-```text
-?sort_by=name
-?sort_by=name,created_at&sort_dir=asc,desc
-?sort_by=profile.city&sort_dir=asc
-```
-
-Relation sorting supports one-level relation paths like `profile.city`.
-
-### Basic filters
-
-```text
-?filters[status]=active
-?filters[score][operator]=>=&filters[score][value]=90
-?filters[score][operator]=between&filters[score][value]=50,100
-```
-
-Large `in` / `not_in` lists are capped by `max_filter_value_count`.
-Direct filtering on `deleted_at` is intentionally blocked; use `trashed=with` or `trashed=only` instead.
-
-### Relation filters
-
-```text
-?filters[roles.name]=Admin
-?filters[profile.country]=DE
-?filters[profile.is_public]=true
-```
-
-Boolean relation filters are normalized automatically when the related model defines boolean casts.
-
-### Custom filters
-
-```text
-?filters[is_high_score]=1
-```
-
-### Date range
-
-```text
-?date_from=2025-01-01
-?date_to=2025-12-31
-?date_column=created_at
-```
-
-If you define `$dateFilterable`, the `date_column` value must be in that allow-list. If you do not define `$dateFilterable`, the package falls back to the model's `$filterable` allow-list.
-
-### Column selection
-
-```text
-?columns=id,name,email
-```
-
-The model primary key is automatically kept in the selected output.
-Column selection requires an explicit `$selectable` allow-list.
-
-### Eager loading
-
-```text
-?with[]=profile
-?with[]=roles.permissions
-```
-
-Eager loading requires an explicit `$allowedRelations` allow-list.
-
-### Soft deletes
-
-```text
-?trashed=with
-?trashed=only
-```
-
-## Filter Operators
-
-Supported operators:
-
-```text
-=
-!=
-<
->
-<=
->=
-like
-not_like
-in
-not_in
-between
-null
-not_null
-```
-
-You can globally support these operators while still restricting per-field usage with `$allowedFilterOperators`.
-
-## Strict Mode
-
-Strict mode helps when you want invalid query parameters to fail loudly instead of being ignored silently.
-
-You can enable it globally in config:
+Advanced service-level entry points used internally by the fluent and trait APIs.
 
 ```php
-'strict_mode' => true,
-```
-
-Or enable it per model:
-
-```php
-protected bool $queryBuilderStrict = true;
-```
-
-When strict mode is enabled, invalid filters, sorts, eager loads, date columns, or similar invalid query inputs throw:
-
-```php
-GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidQueryBuilderQuery
-```
-
-You can catch it in your app and return your own API response format.
-
-Example:
-
-```php
-use GhostCompiler\LaravelQueryBuilder\Exceptions\InvalidQueryBuilderQuery;
-
-public function index(Request $request)
-{
-    try {
-        return User::queryBuilder($request)->paginateTable();
-    } catch (InvalidQueryBuilderQuery $exception) {
-        return response()->json([
-            'status' => false,
-            'message' => 'Invalid query parameters.',
-            'errors' => $exception->errors(),
-        ], 422);
-    }
-}
-```
-
-## Custom Filter Callbacks
-
-Custom filters are useful when a filter does not map cleanly to one database column.
-
-Example:
-
-```php
-protected array $customFilters = [
-    'is_high_score' => 'applyHighScoreFilter',
-];
-
-protected function applyHighScoreFilter($query, mixed $value, string $operator, string $field, array $definition): void
-{
-    if (filter_var($value, FILTER_VALIDATE_BOOL)) {
-        $query->where('users.score', '>=', 90);
-    }
-}
-```
-
-This lets you expose readable public API filters while keeping the SQL logic private.
-
-If a custom filter throws an exception, strict mode surfaces it as an `InvalidQueryBuilderQuery` entry using the filter key, for example `filters.is_high_score`, together with the underlying failure message.
-
-## Per-Field Operator Rules
-
-You can control which operators are allowed on which fields:
-
-```php
-protected array $allowedFilterOperators = [
-    'status' => ['=', 'in'],
-    'score' => ['=', '>=', 'between'],
-    'roles.name' => ['='],
-];
-```
-
-This is useful when:
-
-- some fields should never use `like`
-- enum-style fields should only allow exact match
-- public APIs should avoid expensive or unsafe query shapes
-
-## LIKE Pattern Modes
-
-Both search and `like` filters support configurable wildcard modes:
-
-```php
-'search_like_mode' => 'contains',
-'filter_like_mode' => 'contains',
-```
-
-Supported values:
-
-- `contains`
-- `starts_with`
-- `ends_with`
-- `exact`
-
-For large production datasets, `starts_with` is often safer than `contains` because leading wildcards can force full table scans.
-
-## Response Shape with `paginateTable()`
-
-The package can return a table-style response structure:
-
-```php
-return User::queryBuilder($request)->paginateTable();
-```
-
-Example shape:
-
-```json
-{
-  "status": true,
-  "data": [],
-  "pagination": {
-    "total": 0,
-    "per_page": 15,
-    "current_page": 1,
-    "last_page": 1,
-    "from": null,
-    "to": null,
-    "has_more": false,
-    "links": {
-      "first": null,
-      "last": null,
-      "prev": null,
-      "next": null
-    }
-  },
-  "meta": {
-    "search": null,
-    "applied_sorts": [],
-    "applied_filters": []
-  }
-}
-```
-
-If you pass a custom message:
-
-```php
-return User::queryBuilder($request, [
-    'message' => 'Users fetched successfully.',
-])->paginateTable();
-```
-
-Then the payload also includes:
-
-```json
-{
-  "status": true,
-  "message": "Users fetched successfully."
-}
-```
-
-If you want the status value to be a string instead of a boolean, change config:
-
-```php
-'response' => [
-    'status_key' => 'status',
-    'status_value' => 'success',
-    'message_key' => 'message',
-],
-```
-
-You can also override response metadata per call:
-
-```php
-return User::queryBuilder($request, [
-    'status' => 'success',
-    'message' => 'Users fetched successfully.',
-])->paginateTable();
-```
-
-## Full Example
-
-```php
-public function index(Request $request)
-{
-    return User::queryBuilder($request)->paginateTable();
-}
-```
-
-Example request:
-
-```text
-/api/users?search=admin&filters[status]=active&filters[roles.name]=Admin&sort_by=created_at&sort_dir=desc&with[]=profile&page=1&per_page=20
-```
-
-## Safe Model Checklist
-
-For production APIs, your model should usually define:
-
-- `$searchable`
-- `$filterable`
-- `$sortable`
-- `$selectable`
-- `$allowedRelations`
-- `$allowedFilterOperators`
-- `$customFilters` when needed
-
-This package is now deny-by-default for request-driven filters, includes, sorts, and selected columns unless those allow-lists are explicitly defined.
-
-## Security and Usage
-
-This package validates and applies request-driven query instructions safely, but it does not replace application-level authorization or tenant scoping.
-
-### Always start from a safe base query
-
-The safest pattern is to scope the base query first, then let the package apply allowed search, filter, sort, and pagination behavior on top of it.
-
-Safe:
-
-```php
-public function index(Request $request)
-{
-    return $request->user()
-        ->videos()
-        ->queryBuilder($request)
-        ->paginateTable();
-}
-```
-
-Also safe:
-
-```php
-public function index(Request $request)
-{
-    return Video::query()
-        ->where('account_id', $request->user()->account_id)
-        ->queryBuilder($request)
-        ->paginateTable();
-}
-```
-
-Less safe for multi-tenant apps:
-
-```php
-public function index(Request $request)
-{
-    return Video::queryBuilder($request)->paginateTable();
-}
-```
-
-If your app needs tenant boundaries, ownership checks, team scoping, or policy-based restrictions, apply those constraints before using the query builder.
-
-### Soft deletes must go through `trashed`
-
-Direct request-driven filtering on `deleted_at` is intentionally blocked. Use:
-
-- `?trashed=with`
-- `?trashed=only`
-
-This keeps soft-delete behavior explicit and prevents request parameters from manipulating the soft-delete column directly.
-
-### Relation depth is intentionally capped
-
-Request-driven dotted relation paths are limited by `max_relation_depth` for:
-
-- eager loading
-- relation filters
-- searchable relation fields
-
-This helps prevent overly deep relation chains from turning into expensive queries.
-
-Standard relation paths and `morphMany` relation paths are covered by the current test suite for search, filtering, and eager loading. Relation sorting is still intentionally focused on the standard one-level relation types supported by the package.
-
-### Index the fields you expose
-
-If a field is used in:
-
-- `$filterable`
-- `$sortable`
-- `$searchable` for prefix or exact search use cases
-
-you should strongly consider indexing it at the database level. The package can validate and build safe queries, but database indexes are still what make those queries fast in production.
-
-### Header mode is optional
-
-If you enable `query_headers.enabled`, the package can read query-builder instructions from headers like `X-Query-Search` and `X-Query-Filter`.
-
-That is useful when:
-
-- you want cleaner shareable URLs
-- query strings become too long
-- a frontend wants to send structured filter payloads without switching to POST
-
-If both headers and request query parameters are present, precedence is controlled by `query_headers.override_request_values`.
-
-### Long-lived workers are supported
-
-The package uses `WeakMap`-backed registries for remembered request and response metadata, so temporary builder state follows the lifecycle of the underlying query object instead of lingering across long-lived PHP worker processes.
-
-### Aliased base queries are supported
-
-The package supports base queries that rename the root table with `from('table as alias')`. Qualification, filtering, sorting, and soft-delete handling now follow the active base-table reference instead of assuming the raw model table name.
-
-Example:
-
-```php
-User::query()
-    ->from('users as members')
-    ->queryBuilder($request)
-    ->paginateTable();
+app(QueryBuilderEngine::class)->apply($builder, $request);
+app(QueryBuilderEngine::class)->applyWithDefinition($builder, $request, $definition);
+app(QueryBuilderEngine::class)->paginate($builder, $request);
+app(QueryBuilderEngine::class)->paginateTable($builder, $request);
 ```
 
 ## Testing
-
-This package includes:
-
-- Orchestra Testbench
-- an in-memory SQLite test database
-- fixture models and relations
-- morph relation coverage for request-driven search, filters, and eager loading
-- CI coverage for Laravel 10 through 13
-
-The package runtime supports PHP 8.1+, while the local static-analysis quality stack is intended to run on PHP 8.2+ because current Larastan releases require that.
 
 Run tests:
 
 ```bash
 composer test
+```
+
+Run formatting:
+
+```bash
+composer format
+```
+
+Run lint checks:
+
+```bash
+composer lint
+```
+
+Run static analysis:
+
+```bash
+composer stan
 ```
 
 Run the full quality suite:
@@ -859,7 +1075,7 @@ Run the full quality suite:
 composer quality
 ```
 
-Optional PostgreSQL test runs can also be configured through environment variables in local development:
+Optional PostgreSQL test runs can be configured through environment variables:
 
 ```bash
 TEST_DB_CONNECTION=pgsql
@@ -870,8 +1086,6 @@ TEST_DB_USERNAME=postgres
 TEST_DB_PASSWORD=secret
 composer test
 ```
-
-The package test harness supports this mode, but you need a reachable PostgreSQL server and a prepared test database on your machine.
 
 ## Quality and Security
 
@@ -884,3 +1098,25 @@ Additional package docs:
 ## License
 
 MIT
+
+## Development And Build Environment
+
+This package was developed using **ServBay** as the local development environment.
+
+### Development Tool Used
+
+- Local development tool: `ServBay`
+- Website: [www.servbay.com](https://www.servbay.com/)
+
+### ServBay Assets
+
+ServBay logo and icon are included in this repository for README rendering.
+
+<p>
+  <img src="assets/servbay/servbay-icon-blue-512.svg" alt="ServBay Icon" width="96">
+</p>
+
+### Testing And Build Machine
+
+- Tested on: `Mac M4`
+- Built on: `Mac M4`
