@@ -1,13 +1,13 @@
 # Laravel Query Builder
 
 <p align="center">
-  <img src="assets/logo/logo.png" alt="Laravel Query Builder Logo" width="180">
+  <img src="https://res.cloudinary.com/djgvfl1tv/image/upload/v1780666791/logo_mqnqn4.png" alt="Laravel Uploads Logo" width="180">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Laravel-10%20to%2013-FF2D20?style=for-the-badge&logo=laravel&logoColor=white" alt="Laravel">
   <img src="https://img.shields.io/badge/PHP-8.1%2B-777BB4?style=for-the-badge&logo=php&logoColor=white" alt="PHP">
-  <img src="https://img.shields.io/badge/Built%20For-Eloquent%20APIs-0F172A?style=for-the-badge" alt="Eloquent APIs">
+  <img src="https://img.shields.io/badge/Built%20With-Laravel%20Storage-0F172A?style=for-the-badge" alt="Laravel Storage">
 </p>
 
 > A Laravel package for API-ready Eloquent query building with searchable fields, nested relation filters, relation sorting, strict mode, custom filters, pagination helpers, and safer public query interfaces.
@@ -1108,12 +1108,10 @@ This package was developed using **ServBay** as the local development environmen
 - Local development tool: `ServBay`
 - Website: [www.servbay.com](https://www.servbay.com/)
 
-### ServBay Assets
-
-ServBay logo and icon are included in this repository for README rendering.
+### ServBay your development friend
 
 <p>
-  <img src="assets/servbay/servbay-icon-blue-512.svg" alt="ServBay Icon" width="96">
+  <img src="https://res.cloudinary.com/djgvfl1tv/image/upload/v1780667063/servbay_edc7jz.png" alt="ServBay Icon" width="96">
 </p>
 
 ### Testing And Build Machine
