@@ -10,6 +10,11 @@
   <img src="https://img.shields.io/badge/Built%20With-Laravel%20Storage-0F172A?style=for-the-badge" alt="Laravel Storage">
 </p>
 
+<p align="center">
+    <img src="https://img.shields.io/github/stars/ghostcompiler/laravel-querybuilder?style=for-the-badge&logo=github" />
+    <img src="https://img.shields.io/packagist/dt/ghostcompiler/laravel-querybuilder?style=for-the-badge&logo=packagist" />
+</p>
+
 > A Laravel package for API-ready Eloquent query building with searchable fields, nested relation filters, relation sorting, strict mode, custom filters, pagination helpers, and safer public query interfaces.
 
 ## Overview
