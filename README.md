@@ -1103,23 +1103,3 @@ Additional package docs:
 ## License
 
 MIT
-
-## Development And Build Environment
-
-This package was developed using **ServBay** as the local development environment.
-
-### Development Tool Used
-
-- Local development tool: `ServBay`
-- Website: [www.servbay.com](https://www.servbay.com/)
-
-### ServBay your development friend
-
-<p>
-  <img src="https://res.cloudinary.com/djgvfl1tv/image/upload/v1780667063/servbay_edc7jz.png" alt="ServBay Icon" width="96">
-</p>
-
-### Testing And Build Machine
-
-- Tested on: `Mac M4`
-- Built on: `Mac M4`
